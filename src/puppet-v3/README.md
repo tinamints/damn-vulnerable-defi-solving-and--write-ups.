@@ -8,4 +8,4 @@ The Uniswap market has 100 WETH and 100 DVT in liquidity. The lending pool has a
 
 Starting with 1 ETH and some DVT, you must save all from the vulnerable lending pool. Don't forget to send them to the designated recovery account.
 
-_NOTE: this challenge requires a valid RPC URL to fork mainnet state into your local environment._
+
