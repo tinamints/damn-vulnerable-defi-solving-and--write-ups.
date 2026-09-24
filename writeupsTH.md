@@ -9,6 +9,8 @@ by tinamints
 -  DoS
 ### วิธีแก้ :
 - ส่งโทเคนโดยตรง (ไม่ผ่าน `deposit`) เพื่อทำให้ `convertToShares(totalSupply) != balanceBefore` เป็นจริงและเกิด revert เนื่องจาก `totalSupply` อัปเดตได้เฉพาะผ่าน `deposit` เท่านั้น
+### การป้องกัน :
+- อย่าผูก invariant เข้ากับ `token.balanceOf` โดยตรง ระบบบัญชีแบบ ERC4626 ควรเก็บ shares/assets ภายในเอง เพื่อไม่ให้การ `transfer` ตรง ๆ ทำให้ `flashLoan` พัง — ควรลบเช็ค `convertToShares(totalSupply) != balanceBefore` ออก
 ### POC
 ` function test_unstoppable() public checkSolvedByPlayer {
         token.transfer(address(vault), 1);
@@ -23,6 +25,8 @@ by tinamints
 -  แฟลชโลน
 ### วิธีแก้ :
 - ระบุ receiver เป็นเป้าหมายให้ค่าธรรมเนียมดูด ETH จนหมด แล้วปลอมตัวเป็น feeReceiver เพื่อถอน WETH ที่สะสมไว้
+### การป้องกัน :
+- ตรวจสอบตัวตนของผู้เริ่ม flash loan จริง ๆ (อย่าให้ receiver ถูกเก็บค่าธรรมเนียมจาก loan ที่ตัวเองไม่ได้ขอ) และอย่าเชื่อ `_msgSender()` ที่ส่งผ่าน forwarder สำหรับ `withdraw` — ใช้ access control ที่ถูกต้อง/ตรวจสอบ forwarder ที่ไว้ใจได้
 ### POC
 ` function test_naiveReceiver() public checkSolvedByPlayer {
     
@@ -55,6 +59,8 @@ by tinamints
 -  ค่าที่ไม่ได้ตรวจสอบ
 ### วิธีแก้ :
 - ตั้ง `target` เป็น pool และส่ง `approve` เป็น `data` เพื่อให้ pool อนุมัติให้ผู้โจมตีใช้โทเคนของ pool เอง
+### การป้องกัน :
+- อย่าให้ pool เรียก `target.call(data)` แบบ arbitrary ด้วยสิทธิ์ของตัวเอง — ตัดการเรียก calldata ที่ผู้ใช้กำหนดออก หรือทำ whitelist target/selector เพื่อไม่ให้เรียก `approve` บน token ได้
 ### POC
 `function test_truster() public checkSolvedByPlayer {
         Attacker attacker = new Attacker(pool, recovery, token, TOKENS_IN_POOL);
@@ -69,6 +75,8 @@ by tinamints
 -  แฟลชโลนแบบมีหลักประกัน
 ### วิธีแก้ :
 - ใช้ประโยชน์จากการที่ `execute` ถูกเรียกระหว่างแฟลชโลน เพื่อฝาก ETH ที่ยืมมากลับเข้า pool เพิ่ม `balance` และได้สิทธิ์เรียก `withdraw` ในภายหลัง
+### การป้องกัน :
+- ตรวจการคืนเงินกู้จากยอด balance ของ token ที่เพิ่มขึ้นจริง (พร้อม reentrancy guard) ไม่ใช่ปล่อยให้การ `deposit` ระหว่าง loan นับเป็นการคืนเงิน
 ### POC
 ` function test_sideEntrance() public checkSolvedByPlayer {
         SideEntranceExploit exploit = new SideEntranceExploit(pool, recovery);
@@ -88,6 +96,8 @@ by tinamints
 -  ระบบมาร์เคิลทรี
 ### วิธีแก้ :
 - ใช้ประโยชน์จากการที่ `claimRewards()` ไม่ทำเครื่องหมายการเรียกร้องว่าใช้แล้ว จึงสามารถเรียกร้องโทเคนเดิมซ้ำหลายครั้งในการเรียกเดียวเพื่อดึงสินทรัพย์ทั้งหมด
+### การป้องกัน :
+- ทำเครื่องหมายว่า claim ถูกใช้แล้ว (set claimed bit) ก่อน/ภายในลูป และปฏิเสธ claim ของ (token,batch) ที่ซ้ำ เพื่อไม่ให้เคลม reward เดิมซ้ำได้ในครั้งเดียว
 ### POC
 ` function test_theRewarder() public checkSolvedByPlayer {
         
@@ -172,6 +182,8 @@ by tinamints
 -  การปลอมแปลงอำนาจโหวต governance
 ### วิธีแก้ :
 - ยืมโทเคนของ pool ผ่านแฟลชโลนเพื่อได้อำนาจโหวตส่วนใหญ่ชั่วคราว คิว `emergencyExit` เป็น governance action คืนโลน รอ 2 วัน แล้วรัน action
+### การป้องกัน :
+- คำนวณ voting power จาก balance แบบ checkpoint/ถ่วงน้ำหนักด้วยเวลา ที่ถือก่อนสร้าง proposal เพื่อไม่ให้ balance ที่ flashloan มาในบล็อกเดียวถึง quorum ได้
 ### POC
 ` function test_selfie() public checkSolvedByPlayer {
         pool.flashLoan(this, address(token), TOKENS_IN_POOL, "");
@@ -190,6 +202,8 @@ by tinamints
 -  การรั่วไหลของ private key
 ### วิธีแก้ :
 - ถอดรหัส private key จากข้อความ hex ใน README ของ oracle 2 แหล่ง ตั้งราคา NFT เป็น 0 ซื้อด้วย 1 wei คืนราคาเป็น 999 ETH ขาย NFT แล้วส่ง ETH ไปยัง recovery
+### การป้องกัน :
+- เก็บ private key ของ oracle ให้ปลอดภัย และรวมราคาจากหลายแหล่งที่เป็นอิสระพร้อมเช็คความเบี่ยงเบน (เช่น Chainlink) เพื่อไม่ให้การรั่ว/ควบคุมไม่กี่แหล่งกำหนดราคาได้
 ### POC
 ` function test_compromised() public checkSolved {
         vm.prank(source1); oracle.postPrice("DVNFT", 0);
@@ -216,6 +230,8 @@ by tinamints
 -  EIP-2612 permit
 ### วิธีแก้ :
 - ทุ่ม DVT 1000 ของผู้เล่นเข้า Uniswap V1 เพื่อทำให้ราคาโทเคนดิ่ง ทำให้ `calculateDepositRequired` ต้องการหลักประกันแทบเป็นศูนย์ แล้วยืมโทเคนทั้งหมดใน 1 tx โดยใช้ permit
+### การป้องกัน :
+- อ่านราคาจาก oracle ที่ทนต่อการปั่น (TWAP / Chainlink) ไม่ใช่ราคา spot จาก reserves ของ Uniswap V1 ทันที
 ### POC
 ` function test_puppet() public checkSolvedByPlayer {
         PuppetPoolAttacker attacker = new PuppetPoolAttacker(
@@ -234,6 +250,8 @@ by tinamints
 -  หลักประกัน WETH
 ### วิธีแก้ :
 - ขาย DVT 10k ของผู้เล่นทั้งหมดเข้า Uniswap V2 เพื่อทำให้ราคา DVT ดิ่ง แล้วยืมโทเคน 1M ด้วยหลักประกัน WETH ที่น้อยมาก
+### การป้องกัน :
+- เหมือน Puppet: ใช้ TWAP/oracle ภายนอกแทนราคา spot จาก `getReserves` ของ Uniswap V2 ในการตีมูลค่าหลักประกัน
 ### POC
 ` function test_puppetV2() public checkSolvedByPlayer {
         token.approve(address(uniswapV2Router), PLAYER_INITIAL_TOKEN_BALANCE);
@@ -255,6 +273,8 @@ by tinamints
 -  บั๊กในลอจิกการซื้อของ NFT marketplace
 ### วิธีแก้ :
 - ยืม 15 ETH (ราคา NFT 1 ชิ้น) จากแฟลชโลน บั๊กใน marketplace คือตรวจ `msg.value >= price` แค่ครั้งเดียวแต่ซื้อได้ทั้ง 6 ชิ้น และส่ง ETH คืนให้ผู้ซื้อแทนผู้ขาย ซื้อทั้ง 6 ชิ้นด้วย 15 ETH ส่งไปยัง recoveryManager เพื่อรับ bounty 45 ETH
+### การป้องกัน :
+- คิดเงินเป็นผลรวมราคาของ NFT ทุกชิ้น (ตรวจการจ่ายเงินต่อชิ้น) และส่งเงินให้ผู้ขาย (เจ้าของก่อนโอน) ตามหลัก checks-effects-interactions
 ### POC
 ` function test_freeRider() public checkSolvedByPlayer {
         flashLoanUser attacker = new flashLoanUser(
@@ -274,6 +294,8 @@ by tinamints
 -  การแทรกคำสั่งในช่วง setup
 ### วิธีแก้ :
 - ใช้ฟิลด์ `initializer` ของ `createProxyWithCallback` เพื่อแทรก `approve` ระหว่าง `setup()` ของ Safe เมื่อ WalletRegistry ส่ง DVT 10 ให้ wallet ใหม่ ผู้โจมตีก็ `transferFrom` ทันที ทำซ้ำสำหรับผู้ใช้ทั้ง 4 คน
+### การป้องกัน :
+- ให้ registry ตรวจสอบการ setup ของ wallet ใหม่ (owner ที่คาดไว้, ไม่มี module/delegatecall/การเรียกที่ถูกฝัง) ก่อนจ่ายเงิน แทนที่จะเชื่อ calldata `initializer` ที่กำหนดเองได้
 ### POC
 ` function test_backdoor() public checkSolvedByPlayer {
         new Attacker(
@@ -291,6 +313,8 @@ by tinamints
 -  การอัพเกรด UUPS proxy
 ### วิธีแก้ :
 - `execute()` รันแอคชันก่อนตรวจสอบว่า schedule ไว้หรือยัง รัน batch: ①ตั้ง delay เป็น 0 ②มอบ proposer role ให้ attacker ③อัพเกรด vault เป็น implementation อันตราย ④เรียก `schedule` ย้อนหลังจากภายใน callback จากนั้นเรียก `sweepFunds` บน vault ที่อัพเกรดแล้ว
+### การป้องกัน :
+- ตรวจว่า operation ถูก schedule และพร้อมแล้ว ก่อน execute (และทำเครื่องหมายว่า executed ก่อนเรียก external) — บังคับลำดับ schedule ก่อน execute
 ### POC
 ` function test_climber() public checkSolvedByPlayer {
         MaliciousVaultImpl maliciousImpl = new MaliciousVaultImpl();
@@ -309,6 +333,8 @@ by tinamints
 -  การขุดที่อยู่ด้วย CREATE2
 ### วิธีแก้ :
 - ตัวแปร `needsInit` ของ `AuthorizerUpgradeable` อยู่ที่ storage slot 0 ซึ่งชนกับที่อยู่ `upgrader` ของ proxy (ซึ่งไม่เป็นศูนย์เสมอ) ทำให้ใครก็ตามเรียก `init()` ซ้ำเพื่อให้สิทธิ์ตัวเองได้ ส่วน `WalletDeployer.drop()` ตรวจสอบแค่ว่าคู่ `(wat, nonce)` ที่เลือกจะ deploy ด้วย CREATE2 ไปตรงกับ `USER_DEPOSIT_ADDRESS` หรือไม่ จึง brute-force หาค่า nonce จนกว่าจะตรงกัน แล้ว deploy Safe จริงที่ตำแหน่งนั้น (โดยมี `user` เป็นเจ้าของ) จากนั้นดึงเงินออกด้วยลายเซ็นของผู้ใช้ผ่าน `execTransaction` และส่งรางวัลของ deployer ให้กับ `ward`
+### การป้องกัน :
+- เก็บ flag init ไว้ใน slot เฉพาะที่ไม่ชนกัน (ใช้ `Initializable` ของ OZ) เพื่อไม่ให้ replay `init()` ได้ และอย่าโอนเงินไปยัง address ที่คาดการณ์ไว้ก่อนตรวจสอบเจ้าของ wallet ที่ deploy จริง
 ### POC
 `{
      // 1. Get authorized
@@ -389,6 +415,8 @@ by tinamints
 -  ราคาเฉลี่ยถ่วงน้ำหนักตามเวลา (ใช้ `vm.warp` เพื่อบิดเบือนราคาให้มากขึ้น)
 ### วิธีแก้ :
 - เทเหรียญ DVT 110 ของผู้เล่นเข้า pool Uniswap V3 ผ่าน `exactInputSingle` เพื่อกดราคาโทเคนให้ร่วง จากนั้น `vm.warp` เวลาไปข้างหน้าให้ใกล้ขีดจำกัดเวลาที่สุด เพื่อให้ TWAP บิดเบือนราคา ทำให้ `calculateDepositOfWETHRequired` ถูกลงมากพอที่จะกู้ DVT 1 ล้านโดยใช้ WETH ค้ำประกันเพียงเล็กน้อย
+### การป้องกัน :
+- ใช้หน้าต่าง TWAP ที่ยาวขึ้น (และ/หรือ oracle ตัวที่สอง) เพื่อไม่ให้การดันราคาสั้น ๆ ในบล็อกเดียวขยับค่าเฉลี่ยได้มากพอจะโกง quote หลักประกัน
 ### POC
 ` function test_puppetV3() public checkSolvedByPlayer {
         address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
@@ -426,6 +454,8 @@ by tinamints
 -  การปลอมตำแหน่ง offset ใน calldata
 ### วิธีแก้ :
 - `execute()` เช็คสิทธิ์โดยอ่าน selector จากตำแหน่ง calldata ที่ hardcode ไว้ (byte ที่ 100) ไม่ได้อ่านจากตำแหน่งจริงของ `actionData` เราจึงสร้าง calldata ที่วาง selector ของ `withdraw` (ซึ่งผู้เล่นมีสิทธิ์เรียก) ไว้ที่ byte 100 เป็นตัวหลอก ในขณะที่ตัว offset จริงชี้ไปยังข้อมูลที่ซ่อนอยู่ไกลออกไป ซึ่งเป็น payload ของ `sweepFunds` (ที่ผู้เล่นไม่มีสิทธิ์เรียก) ทำให้ระบบตรวจสอบสิทธิ์ผ่านจากตัวหลอก แต่ vault กลับไปรัน action ที่ถูกซ่อนไว้จริง
+### การป้องกัน :
+- ถอดรหัส `actionData` ให้ตรงกับที่จะถูก execute จริง แล้วเช็ค selector ของ payload จริงนั้น — อย่าอ่าน selector สำหรับเช็คสิทธิ์จากตำแหน่ง calldata ที่ hardcode ไว้
 ### POC
 ` function test_abiSmuggling() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(address(vault),address(token),recovery);
@@ -476,6 +506,8 @@ by tinamints
 -  การเช็คเวลาที่เขียนผิด
 ### วิธีแก้ :
 - `fill()` คิดเงินด้วยสูตร `want * _toDVT(price, rate) / totalShards` แบบปัดทศนิยมลง ทำให้ซื้อ 100 shards แล้วจ่าย 0 DVT (100 * 75e21 / 1e25 = 0.75 → 0) แต่ `cancel()` คืนเงินด้วยอีกสูตรคือ `shards * rate / 1e6` แบบปัดขึ้น ทำให้ได้ DVT คืนมาประมาณ 7.5e12 wei ต่อ 100 shards และการเช็คเวลาใน `cancel()` เขียนกลับด้าน เลยยกเลิกได้ทันทีใน block เดียวกับที่ซื้อ จึงวน fill → cancel 10001 รอบใน exploit contract (เพื่อให้จบใน 1 transaction) แล้วส่งกำไรไปที่ recovery
+### การป้องกัน :
+- ใช้การปัดเศษที่สอดคล้องกันและเข้าข้างโปรโตคอลเสมอ (ปัดเงินที่เก็บขึ้น, ปัดเงินคืนลง), ปฏิเสธการ fill ที่ราคาเป็น 0, และแก้เงื่อนไขเช็คเวลาที่กลับด้านใน `cancel()`
 ### POC
 ` function test_shards() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(marketplace,token,recovery);

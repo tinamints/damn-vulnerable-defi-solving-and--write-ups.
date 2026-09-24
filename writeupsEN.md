@@ -9,6 +9,8 @@ by tinamints
 -  DOS
 ### solution : 
 - send token via 'transfer' function to make `if (convertToShares(totalSupply) != balanceBefore) revert InvalidBalance();` true because ERC4626 'totalSupply' only changes when someone send token via 'deposit function 
+### mitigation :
+- Don't tie a hard invariant to `token.balanceOf`; ERC4626 accounting should track shares/assets internally so a direct `transfer` can't break `flashLoan`. Remove the `convertToShares(totalSupply) != balanceBefore` check
 ### POC
 ` function test_unstoppable() public checkSolvedByPlayer {
         token.transfer(address(vault), 1);
@@ -23,6 +25,8 @@ by tinamints
 -  flashloan
 ### solution : 
 - set the reciever as the tarket to pay fee and imposonate the feeReceiver to withdraw the accumulated WETH 
+### mitigation :
+- Authenticate the real loan initiator (don't let a receiver be billed for a loan it didn't request) and don't trust a forwarder's `_msgSender()` for `withdraw` — use proper access control / verify the trusted forwarder
 ### POC
 ` function test_naiveReceiver() public checkSolvedByPlayer {
     
@@ -55,6 +59,8 @@ by tinamints
 -  unchecked argument
 ### solution : 
 - set 'target'=pool and call 'approve' on it to approve the attacker on its token
+### mitigation :
+- Never let the pool make an arbitrary `target.call(data)` with its own authority; drop the user-supplied call, or whitelist the target/selector so it can't call the token's `approve`
 ### POC
 `function test_truster() public checkSolvedByPlayer {
         Attacker attacker = new Attacker(pool, recovery, token, TOKENS_IN_POOL);
@@ -69,6 +75,8 @@ by tinamints
 -  flashloan with collateral
 ### solution :
 - take an advantage of  `execute` being called during the flashloan  to deposit to the pool and get `balance` and get the right to call `withdraw`
+### mitigation :
+- Verify repayment by the pool's actual token-balance increase (with a reentrancy guard), not by letting a `deposit` during the loan count as paying it back
 ### POC
 ` function test_sideEntrance() public checkSolvedByPlayer {
         SideEntranceExploit exploit = new SideEntranceExploit(pool, recovery);
@@ -88,6 +96,8 @@ by tinamints
 -  merkle tree system
 ### solution :
 - take the advantage of the fact that the distributor doesn't check `claimRewards()` when claim the same token and claim the same token multiple times
+### mitigation :
+- Mark each claim as used (set its claimed bit) before/within the loop and reject duplicate (token,batch) claims, so the same reward can't be claimed repeatedly in one call
 ### POC
 ` function test_theRewarder() public checkSolvedByPlayer {
         
@@ -172,6 +182,8 @@ by tinamints
 -  governance voting power
 ### solution :
 - flashloan the pool tokens to temporarily gain majority voting power, queue `emergencyExit` as a governance action, repay the loan, wait 2 days, execute the action
+### mitigation :
+- Base voting power on checkpointed/time-weighted balances held before the proposal, so a flash-loaned balance in a single block can't reach quorum
 ### POC
 ` function test_selfie() public checkSolvedByPlayer {
         pool.flashLoan(this, address(token), TOKENS_IN_POOL, "");
@@ -190,6 +202,8 @@ by tinamints
 -  leaked private keys
 ### solution :
 - decode leaked private keys (from README hex strings) of 2 oracle sources, set NFT price to 0, buy for 1 wei, restore price to 999 ETH, sell NFT, send ETH to recovery
+### mitigation :
+- Keep oracle signer keys secret and aggregate many independent sources with deviation checks (e.g. Chainlink), so leaking/controlling a couple of sources can't set the price
 ### POC
 ` function test_compromised() public checkSolved {
         vm.prank(source1); oracle.postPrice("DVNFT", 0);
@@ -216,6 +230,8 @@ by tinamints
 -  EIP-2612 permit
 ### solution :
 - dump player's 1000 DVT into Uniswap V1 to crash the token price, making `calculateDepositRequired` near zero, then borrow all pool tokens in 1 tx using permit for token approval
+### mitigation :
+- Read the price from a manipulation-resistant oracle (TWAP / Chainlink), not instantaneous Uniswap V1 spot reserves
 ### POC
 ` function test_puppet() public checkSolvedByPlayer {
         PuppetPoolAttacker attacker = new PuppetPoolAttacker(
@@ -234,6 +250,8 @@ by tinamints
 -  WETH collateral
 ### solution :
 - sell all 10k player tokens into Uniswap V2 to crash DVT price, then borrow 1M pool tokens with the now-minimal WETH collateral required
+### mitigation :
+- Same as Puppet: value collateral with a TWAP/external oracle instead of the Uniswap V2 `getReserves` spot price
 ### POC
 ` function test_puppetV2() public checkSolvedByPlayer {
         token.approve(address(uniswapV2Router), PLAYER_INITIAL_TOKEN_BALANCE);
@@ -255,6 +273,8 @@ by tinamints
 -  NFT marketplace buy logic bug
 ### solution :
 - flashloan 15 ETH (price of 1 NFT). marketplace bug: only checks `msg.value >= price` once but allows buying all 6, and sends ETH to the buyer instead of the seller. buy all 6 for 15 ETH, transfer to recoveryManager to claim 45 ETH bounty
+### mitigation :
+- Charge the sum of each NFT's price (validate payment per item) and send proceeds to the seller (the owner before transfer), following checks-effects-interactions
 ### POC
 ` function test_freeRider() public checkSolvedByPlayer {
         flashLoanUser attacker = new flashLoanUser(
@@ -274,6 +294,8 @@ by tinamints
 -  arbitrary call injection during setup
 ### solution :
 - use `createProxyWithCallback`'s `initializer` field to inject an `approve` call during Safe's `setup()`. WalletRegistry sends 10 DVT to the new wallet, attacker immediately `transferFrom` the tokens. repeat for all 4 users
+### mitigation :
+- Have the registry validate the new wallet's setup (expected owners, no modules/delegatecall/injected calls) before paying, instead of trusting arbitrary `initializer` calldata
 ### POC
 ` function test_backdoor() public checkSolvedByPlayer {
         new Attacker(
@@ -291,6 +313,8 @@ by tinamints
 -  UUPS proxy upgrade
 ### solution :
 - `execute()` runs actions before checking if they're scheduled. execute a batch: set delay to 0, grant proposer role to attacker, upgrade vault to malicious impl, retroactively `schedule` the batch from inside the callback. then call `sweepFunds` on the upgraded vault
+### mitigation :
+- Check the operation is scheduled and ready BEFORE executing it (and mark it executed before the external calls) — enforce schedule-then-execute ordering
 ### POC
 ` function test_climber() public checkSolvedByPlayer {
         MaliciousVaultImpl maliciousImpl = new MaliciousVaultImpl();
@@ -310,6 +334,8 @@ by tinamints
 -  CREATE2 address mining
 ### solution :
 - `AuthorizerUpgradeable`'s `needsInit` lives in storage slot 0, which collides with the proxy's `upgrader` address (always non-zero) — so `init()` can be replayed by anyone to self-authorize. `WalletDeployer.drop()` only checks that a chosen `(wat, nonce)` pair CREATE2-deploys to `USER_DEPOSIT_ADDRESS`, so brute-force the nonce until it matches, deploy the real Safe there (owned by `user`), drain it with the user's signature via `execTransaction`, and forward the deployer's reward to `ward`.
+### mitigation :
+- Store the init flag in a dedicated, non-colliding slot (OZ `Initializable`) so `init()` can't be replayed, and don't fund a counterfactual address before verifying the deployed wallet's owner
 ### POC
 `   {
      // 1. Get authorized
@@ -390,6 +416,8 @@ by tinamints
 -  time-weighted average price (delaying the manipulation with `vm.warp`)
 ### solution :
 - dump the player's 110 DVT into the Uniswap V3 pool via `exactInputSingle` to crash the token price, then `vm.warp` forward as close to the time limit as possible so the TWAP shifts toward the crashed price, making `calculateDepositOfWETHRequired` cheap enough to borrow all 1M DVT with minimal WETH collateral
+### mitigation :
+- Use a longer TWAP window (and/or a second oracle) so a short, single-block price push can't move the average enough to cheat the collateral quote
 ### POC
 ` function test_puppetV3() public checkSolvedByPlayer {
         address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
@@ -427,6 +455,8 @@ by tinamints
 -  calldata offset manipulation
 ### solution :
 - `execute()` only checks permissions using the selector read from a hardcoded calldata offset (byte 100), not the real `actionData` offset. Craft calldata where the decoy `withdraw` selector sits at byte 100 (which the player IS permitted to call) while the offset field actually points further along to the real payload — a `sweepFunds` call (which the player is NOT permitted to call) — so the permission check passes on the decoy but the vault executes the smuggled action instead
+### mitigation :
+- Decode `actionData` exactly as it will be executed and check the selector of that real payload — never read the permission selector from a hardcoded calldata offset
 ### POC
 ` function test_abiSmuggling() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(address(vault),address(token),recovery);
@@ -479,6 +509,8 @@ by tinamints
 -  broken time check
 ### solution :
 - `fill()` charges `want * _toDVT(price, rate) / totalShards` rounded down, so buying 100 shards costs 0 DVT (100 * 75e21 / 1e25 = 0.75 → 0). `cancel()` refunds with a different formula, `shards * rate / 1e6` rounded up, which pays back ~7.5e12 DVT wei for the same 100 shards. `cancel()`'s time check is also written backwards, so you can cancel in the same block as the purchase. Loop fill → cancel 10001 times inside one exploit contract (to keep it to one transaction) and send the profit to recovery
+### mitigation :
+- Use consistent rounding that always favors the protocol (round the charge up, refund down), reject zero-cost fills, and fix the reversed time-window comparison in `cancel()`
 ### POC
 ` function test_shards() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(marketplace,token,recovery);

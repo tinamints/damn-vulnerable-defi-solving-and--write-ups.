@@ -9,6 +9,8 @@ by tinamints
 -  DoS攻撃
 ### 解法 :
 - `deposit`を使わずに直接トークンを送ることで `convertToShares(totalSupply) != balanceBefore` を成立させてリバートを引き起こす（`totalSupply`は`deposit`経由でしか更新されないため）
+### 対策 :
+- `token.balanceOf` に厳格な不変条件を結びつけないこと。ERC4626 の会計は shares/assets を内部で管理し、直接 `transfer` で `flashLoan` が壊れないようにする——`convertToShares(totalSupply) != balanceBefore` のチェックは削除する
 ### POC
 ` function test_unstoppable() public checkSolvedByPlayer {
         token.transfer(address(vault), 1);
@@ -23,6 +25,8 @@ by tinamints
 -  フラッシュローン
 ### 解法 :
 - receiverを対象に指定して(フラッシュローンの)手数料によってETHを全額消費させ、feeReceiverになりすまして蓄積したWETHを引き出す
+### 対策 :
+- flash loan の本当の発行者を認証し（receiver が自分で頼んでいない loan の手数料を払わされないように）、`withdraw` で forwarder 経由の `_msgSender()` を信用しない——適切なアクセス制御／信頼できる forwarder の検証を行う
 ### POC
 ` function test_naiveReceiver() public checkSolvedByPlayer {
         bytes[] memory data = new bytes[](10);
@@ -52,6 +56,8 @@ by tinamints
 -  未検証の引数
 ### 解法 :
 - `target`にプールを指定し`data`に`approve`を渡すことで、プール自身が攻撃者のトークン使用を承認するよう仕向ける
+### 対策 :
+- pool が自身の権限で任意の `target.call(data)` を実行させない——ユーザ指定の呼び出しを廃止するか、target/selector をホワイトリスト化して token の `approve` を呼べないようにする
 ### POC
 `function test_truster() public checkSolvedByPlayer {
         Attacker attacker = new Attacker(pool, recovery, token, TOKENS_IN_POOL);
@@ -65,6 +71,8 @@ by tinamints
 -  担保付きフラッシュローン
 ### 解法 :
 - フラッシュローン中に`execute`が呼ばれることを利用し、借りたETHをそのまま`deposit`してプール内の`balance`を増やし、後から`withdraw`する権利を得る
+### 対策 :
+- loan の返済は、`deposit` を返済扱いにするのではなく、token 残高が実際に増えたかで確認する（reentrancy guard も併用）
 ### POC
 ` function test_sideEntrance() public checkSolvedByPlayer {
         SideEntranceExploit exploit = new SideEntranceExploit(pool, recovery);
@@ -81,6 +89,8 @@ by tinamints
 -  マークルツリーシステム
 ### 解法 :
 - `claimRewards()`が同一トークンの請求を使用済みとしてマークしないことを悪用し、同じトークンを1回の呼び出しで何度も請求して全額を引き出す
+### 対策 :
+- claim を処理する前／ループ内で使用済みフラグ（claimed bit）を立て、同一 (token,batch) の重複 claim を拒否し、一度の呼び出しで同じ報酬を何度も claim できないようにする
 ### POC
 ` function test_theRewarder() public checkSolvedByPlayer {
         // DVT・WETHの報酬JSONを読み込み、プレイヤーのマークルプルーフを構築
@@ -99,6 +109,8 @@ by tinamints
 -  ガバナンス投票権の操作
 ### 解法 :
 - フラッシュローンでプールのトークンを一時的に借りて過半数の投票権を獲得し、`emergencyExit`をガバナンスアクションとしてキューに登録、ローンを返済後2日待ってアクションを実行する
+### 対策 :
+- 投票権は proposal 作成前に保有していた checkpoint／時間加重の残高で計算し、単一ブロックで flashloan した残高が quorum に届かないようにする
 ### POC
 ` function test_selfie() public checkSolvedByPlayer {
         pool.flashLoan(this, address(token), TOKENS_IN_POOL, "");
@@ -117,6 +129,8 @@ by tinamints
 -  秘密鍵の漏洩
 ### 解法 :
 - READMEのhex文字列から2つのオラクルの秘密鍵をデコードし、NFT価格を0に設定、1weiで購入、価格を999ETHに戻してNFTを売却、ETHをリカバリーへ送る
+### 対策 :
+- oracle の秘密鍵を安全に保ち、複数の独立したソースを乖離チェック付きで集約する（例：Chainlink）——数個のソースの漏洩／支配で価格を決められないようにする
 ### POC
 ` function test_compromised() public checkSolved {
         vm.prank(source1); oracle.postPrice("DVNFT", 0);
@@ -143,6 +157,8 @@ by tinamints
 -  EIP-2612 permit
 ### 解法 :
 - プレイヤーの1000 DVTをUniswap V1に売却してトークン価格を暴落させ、`calculateDepositRequired`の要求担保額をほぼゼロにする。permitを使って1txで全プールトークンを借り出す
+### 対策 :
+- 価格は Uniswap V1 の即時 spot reserves ではなく、操作耐性のある oracle（TWAP / Chainlink）から取得する
 ### POC
 ` function test_puppet() public checkSolvedByPlayer {
         PuppetPoolAttacker attacker = new PuppetPoolAttacker(
@@ -161,6 +177,8 @@ by tinamints
 -  WETH担保
 ### 解法 :
 - プレイヤーの1万DVTをUniswap V2で全売却してDVT価格を暴落させ、最小限のWETH担保で100万枚のトークンを借り出す
+### 対策 :
+- Puppet と同様：担保評価には Uniswap V2 の `getReserves` の spot 価格ではなく TWAP／外部 oracle を使う
 ### POC
 ` function test_puppetV2() public checkSolvedByPlayer {
         token.approve(address(uniswapV2Router), PLAYER_INITIAL_TOKEN_BALANCE);
@@ -182,6 +200,8 @@ by tinamints
 -  NFTマーケットプレイスの購入ロジックのバグ
 ### 解法 :
 - Uniswapから15 ETH（NFT1枚分の価格）をフラッシュローンで借りる。マーケットの`buyMany`は`msg.value >= price`を1回しかチェックせず全6枚を購入できる上、ETHを売り手ではなく買い手に送るバグがある。6枚を15 ETHで購入してrecoveryManagerに転送し45 ETHのバウンティを受け取る
+### 対策 :
+- 各 NFT の価格の合計を請求し（アイテムごとに支払いを検証）、代金は売り手（転送前の所有者）に送る。checks-effects-interactions に従う
 ### POC
 ` function test_freeRider() public checkSolvedByPlayer {
         flashLoanUser attacker = new flashLoanUser(
@@ -201,6 +221,8 @@ by tinamints
 -  setup時の任意呼び出し注入
 ### 解法 :
 - `createProxyWithCallback`の`initializer`引数を悪用し、Safeの`setup()`中に`approve`を実行させる。WalletRegistryが新ウォレットに10 DVTを送ると即座に`transferFrom`で引き出す。4ユーザー分繰り返す
+### 対策 :
+- registry は任意の `initializer` calldata を信用せず、支払い前に新しい wallet の setup（想定した owner、module/delegatecall/埋め込み呼び出しが無いこと）を検証する
 ### POC
 ` function test_backdoor() public checkSolvedByPlayer {
         new Attacker(
@@ -218,6 +240,8 @@ by tinamints
 -  UUPSプロキシアップグレード
 ### 解法 :
 - `execute()`はアクションのスケジュール確認より先に実行する。バッチ実行: ①遅延を0に設定 ②攻撃コントラクトにproposerロールを付与 ③ヴォールトを悪意のある実装にアップグレード ④コールバック内でバッチを後から`schedule`。その後アップグレード済みヴォールトの`sweepFunds`を呼ぶ
+### 対策 :
+- operation が schedule 済みで実行可能かを execute する前に確認し（外部呼び出しの前に executed とマークする）、schedule→execute の順序を強制する
 ### POC
 ` function test_climber() public checkSolvedByPlayer {
         MaliciousVaultImpl maliciousImpl = new MaliciousVaultImpl();
@@ -236,6 +260,8 @@ by tinamints
 -  CREATE2アドレスのマイニング
 ### 解法 :
 - `AuthorizerUpgradeable`の`needsInit`はストレージスロット0にあり、プロキシの`upgrader`アドレス（常に非ゼロ）と衝突している。そのため誰でも`init()`を再度呼び出して自分自身を認可できる。`WalletDeployer.drop()`は選んだ`(wat, nonce)`の組がCREATE2で`USER_DEPOSIT_ADDRESS`にデプロイされるかどうかしかチェックしないので、一致するnonceが見つかるまでブルートフォースし、その場所に本物のSafe（ownerは`user`）をデプロイする。あとはユーザーの署名で`execTransaction`を使って引き出し、deployerの報酬を`ward`に転送する
+### 対策 :
+- init フラグは衝突しない専用スロットに保持し（OZ の `Initializable` を使う）`init()` の再実行を防ぐ。また deploy 済み wallet の所有者を検証する前に、予測アドレスへ資金を送らない
 ### POC
 `{
      // 1. Get authorized
@@ -316,6 +342,8 @@ by tinamints
 -  時間加重平均価格（`vm.warp`で操作の反映を遅らせる仕組み）
 ### 解法 :
 - プレイヤーの110 DVTを`exactInputSingle`でUniswap V3プールに売り、トークン価格を暴落させる。その後`vm.warp`で時間制限ギリギリまで時間を進め、TWAPを暴落後の価格に近づける。これにより`calculateDepositOfWETHRequired`が十分安くなり、わずかなWETH担保で100万DVTを借りられる
+### 対策 :
+- TWAP のウィンドウを長くする（かつ／または 2 つ目の oracle を使う）ことで、単一ブロックの短時間の価格操作が平均を十分に動かして担保見積もりを欺けないようにする
 ### POC
 ` function test_puppetV3() public checkSolvedByPlayer {
         address uniswapRouterAddress = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
@@ -353,6 +381,8 @@ by tinamints
 -  calldataのoffset位置の偽装
 ### 解法 :
 - `execute()`はcalldataの固定位置（100バイト目）から読み取ったselectorだけで権限チェックを行い、実際の`actionData`の位置は見ていない。そこで、プレイヤーが呼び出し許可を持つ`withdraw`のselectorを100バイト目にダミーとして配置し、実際のoffsetはさらに先にある本命のペイロード——プレイヤーが権限を持たない`sweepFunds`呼び出し——を指すようにcalldataを組み立てる。これにより権限チェックはダミーを見て通過するが、vaultは実際には密輸された`sweepFunds`を実行してしまう
+### 対策 :
+- `actionData` を実際に実行されるとおりにデコードし、その本物の payload の selector をチェックする——権限チェック用 selector を calldata の固定オフセットから読まない
 ### POC
 ` function test_abiSmuggling() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(address(vault),address(token),recovery);
@@ -403,6 +433,8 @@ by tinamints
 -  時間チェックのロジックミス
 ### 解法 :
 - `fill()`の支払額は`want * _toDVT(price, rate) / totalShards`で切り捨て計算されるため、100 shardsを買うと0 DVTになる（100 * 75e21 / 1e25 = 0.75 → 0）。一方`cancel()`は別の計算式`shards * rate / 1e6`（切り上げ）で返金するため、同じ100 shardsで約7.5e12 wei のDVTが返ってくる。さらに`cancel()`の時間チェックが逆に書かれているため、購入と同じブロックで即キャンセルできる。1回のトランザクションに収めるためexploitコントラクト内でfill → cancelを10001回繰り返し、利益をrecoveryへ送る
+### 対策 :
+- 常にプロトコル有利に丸める一貫した丸め（請求は切り上げ、返金は切り捨て）を使い、コスト 0 の fill を拒否し、`cancel()` の逆になった時間チェックの比較を修正する
 ### POC
 ` function test_shards() public checkSolvedByPlayer {
          Exploit exploit = new Exploit(marketplace,token,recovery);
