@@ -5,7 +5,7 @@
 i have writeups in 3 languages TH/JA/EN check them out!
 
 ## Progress
-- 15/18 challenges solved
+- 16/18 challenges solved
 -  Current focus: shards
 
 ## Key Lessons
