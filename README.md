@@ -1,57 +1,31 @@
 # My DVDeFi Journey
 **Goal:** Understand smart contract's vulnerability concepts and DeFi system by solving all challenges and writing writeups.
 
-## writeups
-i have writeups in 3 languages TH/JA/EN check them out!
-
 ## Progress
 - 18/18 challenges solved
--  Current focus: -
+-  Current focus: all solved!
 
-## Key Lessons
-- always be careful with what’s passed in calldata [from NaiveReceiver challenge]
-- often times the vulnerability is in the calculation [from Compromised challenge]
+## Writeups
+Each challenge has a writeup in three languages:
 
+1. Unstoppable — [English](./writeupsEN.md#1-unstoppable) | [ไทย](./writeupsTH.md#1-unstoppable) | [日本語](./writeupsJA.md#1-unstoppable)
+2. Naive Receiver — [English](./writeupsEN.md#2-naive-receiver) | [ไทย](./writeupsTH.md#2-naive-receiver) | [日本語](./writeupsJA.md#2-naive-receiver)
+3. Truster — [English](./writeupsEN.md#3-truster) | [ไทย](./writeupsTH.md#3-truster) | [日本語](./writeupsJA.md#3-truster)
+4. Side Entrance — [English](./writeupsEN.md#4-side-entrance) | [ไทย](./writeupsTH.md#4-side-entrance) | [日本語](./writeupsJA.md#4-side-entrance)
+5. The Rewarder — [English](./writeupsEN.md#5-the-rewarder) | [ไทย](./writeupsTH.md#5-the-rewarder) | [日本語](./writeupsJA.md#5-the-rewarder)
+6. Selfie — [English](./writeupsEN.md#6-selfie) | [ไทย](./writeupsTH.md#6-selfie) | [日本語](./writeupsJA.md#6-selfie)
+7. Compromised — [English](./writeupsEN.md#7-compromised) | [ไทย](./writeupsTH.md#7-compromised) | [日本語](./writeupsJA.md#7-compromised)
+8. Puppet — [English](./writeupsEN.md#8-puppet) | [ไทย](./writeupsTH.md#8-puppet) | [日本語](./writeupsJA.md#8-puppet)
+9. Puppet V2 — [English](./writeupsEN.md#9-puppet-v2) | [ไทย](./writeupsTH.md#9-puppet-v2) | [日本語](./writeupsJA.md#9-puppet-v2)
+10. Free Rider — [English](./writeupsEN.md#10-free-rider) | [ไทย](./writeupsTH.md#10-free-rider) | [日本語](./writeupsJA.md#10-free-rider)
+11. Backdoor — [English](./writeupsEN.md#11-backdoor) | [ไทย](./writeupsTH.md#11-backdoor) | [日本語](./writeupsJA.md#11-backdoor)
+12. Climber — [English](./writeupsEN.md#12-climber) | [ไทย](./writeupsTH.md#12-climber) | [日本語](./writeupsJA.md#12-climber)
+13. Wallet Mining — [English](./writeupsEN.md#13-wallet-mining) | [ไทย](./writeupsTH.md#13-wallet-mining) | [日本語](./writeupsJA.md#13-wallet-mining)
+14. Puppet V3 — [English](./writeupsEN.md#14-puppet-v3) | [ไทย](./writeupsTH.md#14-puppet-v3) | [日本語](./writeupsJA.md#14-puppet-v3)
+15. ABI Smuggling — [English](./writeupsEN.md#15-abi-smuggling) | [ไทย](./writeupsTH.md#15-abi-smuggling) | [日本語](./writeupsJA.md#15-abi-smuggling)
+16. Shards — [English](./writeupsEN.md#16-shards) | [ไทย](./writeupsTH.md#16-shards) | [日本語](./writeupsJA.md#16-shards)
+17. Curvy Puppet — [English](./writeupsEN.md#17-curvy-puppet) | [ไทย](./writeupsTH.md#17-curvy-puppet) | [日本語](./writeupsJA.md#17-curvy-puppet)
+18. Withdrawal — [English](./writeupsEN.md#18-withdrawal) | [ไทย](./writeupsTH.md#18-withdrawal) | [日本語](./writeupsJA.md#18-withdrawal)
 
-## Learn with me
-You can explore the codebase in the following order and read my code annotations to learn along with me.
-> Annotations are marked with '>Note (tina):' or '//NOTE (tina):'.
-### exploring order
-1. The challenge's README.md
-2. The challenge's test file
-3. The challenge's main contract and helper contracts
-
-
-## How i solve these challenges
-1. look at the challenge's README.md to understand what is the objective and to get a rough idea of the challenge.
-2. Check out the test file to get an even clearer idea of what is being tested, so we can write the solution under the conditions specified in the test file.
-3. Review the main contract: quickly scan the entire contract then focus on high-risk areas(functions like flashloan, transfer or access control).
-4. start by checking crucial points (conditions, input parameters, calculations). Take time on suspicious areas. make sure every bit of it make sense until we find where it doesn't.
-5. code the solution in the test file and write code annotations.
-
-[Full solutions in `/test`]
-
-
-## Solving order
-1. Unstoppable
-2. Naive receiver
-3. Truster
-4. Side Entrance
-5. The Rewarder
-6. Selfie
-7. Compromised
-8. Puppet
-9. Puppet V2
-10. Free rider
-11. backdoor
-12. climber
-13. wallet mining
-14. puppet v3
-15. ABI smuggling
-16. shards
-17. curvy puppet
-18. withdrawal
-
-
-## Contributing
-Your feedback is gold! If something seems off, I’d really appreciate a PR, it helps a ton🙌
+## PoC
+![alt text](image.png)
