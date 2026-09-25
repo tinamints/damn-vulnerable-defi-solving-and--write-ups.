@@ -5,8 +5,8 @@
 i have writeups in 3 languages TH/JA/EN check them out!
 
 ## Progress
-- 17/18 challenges solved
--  Current focus: withdrawal
+- 18/18 challenges solved
+-  Current focus: -
 
 ## Key Lessons
 - always be careful with what’s passed in calldata [from NaiveReceiver challenge]
